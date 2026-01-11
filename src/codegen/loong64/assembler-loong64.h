@@ -32,8 +32,8 @@ constexpr uint64_t kSmiShiftMask = (1UL << kSmiShift) - 1;
 class Operand {
  public:
   // Immediate.
-  V8_INLINE explicit Operand(int64_t immediate,
-                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+  V8_INLINE Operand(int64_t immediate,
+                    RelocInfo::Mode rmode = RelocInfo::NO_INFO)
       : rm_(no_reg), rmode_(rmode) {
     value_.immediate = immediate;
   }
@@ -44,12 +44,13 @@ class Operand {
   V8_INLINE explicit Operand(Tagged<Smi> value)
       : Operand(static_cast<intptr_t>(value.ptr())) {}
 
-  explicit Operand(Handle<HeapObject> handle);
+  explicit Operand(Handle<HeapObject> handle,
+                   RelocInfo::Mode rmode = RelocInfo::FULL_EMBEDDED_OBJECT);
 
   static Operand EmbeddedNumber(double number);  // Smi or HeapNumber.
 
   // Register.
-  V8_INLINE explicit Operand(Register rm) : rm_(rm) {}
+  V8_INLINE Operand(Register rm) : rm_(rm) {}
 
   // Return true if this is a register operand.
   V8_INLINE bool is_reg() const;
@@ -121,6 +122,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // own buffer. Otherwise it takes ownership of the provided buffer.
   explicit Assembler(const AssemblerOptions&,
                      std::unique_ptr<AssemblerBuffer> = {});
+  // For compatibility with assemblers that require a zone.
+  Assembler(const MaybeAssemblerZone&, const AssemblerOptions& options,
+            std::unique_ptr<AssemblerBuffer> buffer = {})
+      : Assembler(options, std::move(buffer)) {}
 
   virtual ~Assembler() {}
 
@@ -140,6 +145,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // Unused on this architecture.
   void MaybeEmitOutOfLineConstantPool() {}
+  void ClearInternalState() {}
 
   // Loong64 uses BlockTrampolinePool to prevent generating trampoline inside a
   // continuous instruction block. In the destructor of BlockTrampolinePool, it
@@ -168,7 +174,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // but it may be bound only once.
   void bind(Label* L);  // Binds an unbound label L to current code position.
 
-  enum OffsetSize : int { kOffset26 = 26, kOffset21 = 21, kOffset16 = 16 };
+  enum OffsetSize : int {
+    kOffset26 = 26,
+    kOffset21 = 21,
+    kOffset20 = 20,
+    kOffset16 = 16
+  };
 
   // Determines if Label is bound and near enough so that branch instruction
   // can be used to reach it, instead of jump instruction.
@@ -223,13 +234,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
   inline static void set_target_address_at(
       Address pc, Address constant_pool, Address target,
+      WritableJitAllocation* jit_allocation,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED) {
-    set_target_value_at(pc, target, icache_flush_mode);
+    set_target_value_at(pc, target, jit_allocation, icache_flush_mode);
   }
   inline static void set_target_compressed_address_at(
       Address pc, Address constant_pool, Tagged_t target,
+      WritableJitAllocation* jit_allocation,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED) {
-    set_target_compressed_value_at(pc, target, icache_flush_mode);
+    set_target_compressed_value_at(pc, target, jit_allocation,
+                                   icache_flush_mode);
   }
 
   inline Handle<Code> code_target_object_handle_at(Address pc,
@@ -242,18 +256,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   static void set_target_value_at(
       Address pc, uint64_t target,
+      WritableJitAllocation* jit_allocation = nullptr,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
   static void set_target_compressed_value_at(
       Address pc, uint32_t target,
+      WritableJitAllocation* jit_allocation = nullptr,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   static void JumpLabelToJumpRegister(Address pc);
-
-  // This sets the branch destination (which gets loaded at the call address).
-  // This is for calls and branches within generated code.  The serializer
-  // has already deserialized the lui/ori instructions etc.
-  inline static void deserialization_set_special_target_at(
-      Address instruction_payload, Tagged<Code> code, Address target);
 
   // Get the size of the special target encoded at 'instruction_payload'.
   inline static int deserialization_special_target_size(
@@ -261,13 +271,20 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // This sets the internal reference at the pc.
   inline static void deserialization_set_target_internal_reference_at(
-      Address pc, Address target,
+      Address pc, Address target, WritableJitAllocation& jit_allocation,
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   inline Handle<HeapObject> compressed_embedded_object_handle_at(
       Address pc, Address constant_pool);
   inline Handle<HeapObject> embedded_object_handle_at(Address pc,
                                                       Address constant_pool);
+
+  // Read/modify the uint32 constant used at pc.
+  static inline uint32_t uint32_constant_at(Address pc, Address constant_pool);
+  static inline void set_uint32_constant_at(
+      Address pc, Address constant_pool, uint32_t new_constant,
+      WritableJitAllocation* jit_allocation,
+      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   // Here we are patching the address in the LUI/ORI instruction pair.
   // These values are used in the serialization process and must be zero for
@@ -313,6 +330,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void DataAlign(int m);
   // Aligns code to something that's optimal for a jump target for the platform.
   void CodeTargetAlign();
+  void SwitchTargetAlign() { CodeTargetAlign(); }
+  void BranchTargetAlign() {}
   void LoopHeaderAlign() { CodeTargetAlign(); }
 
   // Different nop operations are used by the code generator to detect certain
@@ -754,10 +773,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void RecordDeoptReason(DeoptimizeReason reason, uint32_t node_id,
                          SourcePosition position, int id);
 
-  static int RelocateInternalReference(RelocInfo::Mode rmode, Address pc,
-                                       intptr_t pc_delta);
-  static void RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
-                                        intptr_t pc_delta);
+  static void RelocateRelativeReference(
+      RelocInfo::Mode rmode, Address pc, intptr_t pc_delta,
+      WritableJitAllocation* jit_allocation = nullptr);
 
   // Writes a single byte or word of data in the code stream.  Used for
   // inline tables, e.g., jump-tables.
@@ -783,14 +801,18 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // Read/patch instructions.
   static Instr instr_at(Address pc) { return *reinterpret_cast<Instr*>(pc); }
-  static void instr_at_put(Address pc, Instr instr) {
-    *reinterpret_cast<Instr*>(pc) = instr;
+  static void instr_at_put(Address pc, Instr instr,
+                           WritableJitAllocation* jit_allocation = nullptr) {
+    Instruction* i = reinterpret_cast<Instruction*>(pc);
+    i->SetInstructionBits(instr, jit_allocation);
   }
   Instr instr_at(int pos) {
     return *reinterpret_cast<Instr*>(buffer_start_ + pos);
   }
-  void instr_at_put(int pos, Instr instr) {
-    *reinterpret_cast<Instr*>(buffer_start_ + pos) = instr;
+  void instr_at_put(int pos, Instr instr,
+                    WritableJitAllocation* jit_allocation = nullptr) {
+    Instruction* i = reinterpret_cast<Instruction*>(buffer_start_ + pos);
+    i->SetInstructionBits(instr, jit_allocation);
   }
 
   // Check if an instruction is a branch of some kind.
@@ -804,7 +826,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   static bool IsJump(Instr instr);
   static bool IsMov(Instr instr, Register rd, Register rs);
-  static bool IsPcAddi(Instr instr, Register rd, int32_t si20);
+  static bool IsPcAddi(Instr instr);
 
   static bool IsJ(Instr instr);
   static bool IsLu12i_w(Instr instr);
@@ -1090,7 +1112,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   DoubleRegList scratch_fpregister_list_;
 
  private:
-  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+  void PatchInHeapNumberRequest(Address pc, Handle<HeapNumber> object) override;
 
   int WriteCodeComments();
 
@@ -1152,6 +1174,12 @@ class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
     DoubleRegList list({reg1, reg2});
     ExcludeFp(list);
   }
+
+  RegList* Available() { return available_; }
+  void SetAvailable(const RegList& list) { *available_ = list; }
+
+  DoubleRegList* AvailableFP() { return availablefp_; }
+  void SetAvailableFP(const DoubleRegList& list) { *availablefp_ = list; }
 
  private:
   RegList* available_;

@@ -12,7 +12,7 @@
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/simplified-operator.h"
-#include "src/compiler/typer.h"
+#include "src/compiler/turbofan-typer.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory-inl.h"
 #include "src/objects/objects.h"
@@ -27,8 +27,7 @@ class JSTypedLoweringTester : public HandleAndZoneScope,
                               public JSHeapBrokerTestBase {
  public:
   explicit JSTypedLoweringTester(int num_parameters = 0)
-      : HandleAndZoneScope(kCompressGraphZone),
-        JSHeapBrokerTestBase(main_isolate(), main_zone()),
+      : JSHeapBrokerTestBase(main_isolate(), main_zone()),
         isolate(main_isolate()),
         binop(nullptr),
         unop(nullptr),
@@ -53,7 +52,7 @@ class JSTypedLoweringTester : public HandleAndZoneScope,
   MachineOperatorBuilder machine;
   SimplifiedOperatorBuilder simplified;
   CommonOperatorBuilder common;
-  Graph graph;
+  TFGraph graph;
   Typer typer;
   Node* context_node;
   CompilationDependencies deps;
@@ -131,7 +130,8 @@ class JSTypedLoweringTester : public HandleAndZoneScope,
     std::vector<Node*> inputs;
     inputs.push_back(left);
     inputs.push_back(right);
-    if (JSOperator::IsBinaryWithFeedback(op->opcode())) {
+    if (JSOperator::IsBinaryWithFeedback(op->opcode()) &&
+        !JSOperator::IsBinaryWithEmbeddedFeedback(op->opcode())) {
       inputs.push_back(UndefinedConstant());  // Feedback vector.
     }
     if (OperatorProperties::HasContextInput(op)) {
@@ -190,9 +190,9 @@ class JSTypedLoweringTester : public HandleAndZoneScope,
     CheckHandle(isolate->factory()->false_value(), result);
   }
 
-  void CheckHandle(Handle<HeapObject> expected, Node* result) {
+  void CheckHandle(DirectHandle<HeapObject> expected, Node* result) {
     CHECK_EQ(IrOpcode::kHeapConstant, result->opcode());
-    Handle<HeapObject> value = HeapConstantOf(result->op());
+    DirectHandle<HeapObject> value = HeapConstantOf(result->op());
     CHECK_EQ(*expected, *value);
   }
 };
@@ -834,8 +834,9 @@ void CheckEqualityReduction(JSTypedLoweringTester* R, bool strict, Node* l,
     Node* p1 = j == 1 ? l : r;
 
     {
-      const Operator* op = strict ? R->javascript.StrictEqual(feedback_source)
-                                  : R->javascript.Equal(feedback_source);
+      const Operator* op =
+          strict ? R->javascript.StrictEqual(CompareOperationHint::kNone)
+                 : R->javascript.Equal(feedback_source);
       Node* eq = R->Binop(op, p0, p1);
       Node* reduced = R->reduce(eq);
       R->CheckBinop(expected, reduced);

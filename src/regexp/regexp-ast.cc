@@ -327,7 +327,11 @@ void* RegExpUnparser::VisitLookaround(RegExpLookaround* that, void* data) {
 
 void* RegExpUnparser::VisitBackReference(RegExpBackReference* that,
                                          void* data) {
-  os_ << "(<- " << that->index() << ")";
+  os_ << "(<- " << that->captures()->first()->index();
+  for (int i = 1; i < that->captures()->length(); ++i) {
+    os_ << "," << that->captures()->at(i)->index();
+  }
+  os_ << ")";
   return nullptr;
 }
 
@@ -416,8 +420,8 @@ RegExpClassSetExpression::RegExpClassSetExpression(
     max_match_ = 2;
   } else {
     max_match_ = 0;
-    for (auto op : *operands) {
-      max_match_ = std::max(max_match_, op->max_match());
+    for (auto operand : *operands) {
+      max_match_ = std::max(max_match_, operand->max_match());
     }
   }
 }
@@ -435,6 +439,38 @@ RegExpClassSetExpression* RegExpClassSetExpression::Empty(Zone* zone,
   return zone->template New<RegExpClassSetExpression>(
       RegExpClassSetExpression::OperationType::kUnion, is_negated, false,
       operands);
+}
+
+bool RegExpText::StartsWithAtom() const {
+  if (elements_.length() == 0) return false;
+  return elements_.at(0).text_type() == TextElement::ATOM;
+}
+
+RegExpAtom* RegExpText::FirstAtom() const { return elements_.at(0).atom(); }
+
+RegExpClassRanges::RegExpClassRanges(
+    Zone* zone, ZoneList<CharacterRange>* ranges,
+    RegExpClassRanges::ClassRangesFlags class_ranges_flags)
+    : set_(ranges), class_ranges_flags_(class_ranges_flags) {
+  // Convert the empty set of ranges to the negated Everything() range.
+  if (ranges->is_empty()) {
+    ranges->Add(CharacterRange::Everything(), zone);
+    class_ranges_flags_ ^= NEGATED;
+  }
+  if (!is_negated() && !is_certainly_two_code_points() &&
+      no_case_folding_needed()) {
+    // Perhaps we can detect that it is always two code points.
+    bool found_basic_plane = false;
+    for (int i = 0; i < ranges->length(); i++) {
+      if (ranges->at(i).from() < 0x10000) {
+        found_basic_plane = true;
+        break;
+      }
+    }
+    if (!found_basic_plane) {
+      class_ranges_flags_ |= IS_CERTAINLY_TWO_CODE_POINTS;
+    }
+  }
 }
 
 }  // namespace internal

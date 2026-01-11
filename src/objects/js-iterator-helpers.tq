@@ -4,7 +4,10 @@
 
 @abstract
 extern class JSIteratorHelper extends JSObject {
-  underlying: iterator::IteratorRecord;
+  // We cannot use  `IteratorRecord` because we use `Null` and `Undefined` as
+  // sentinel values to track the status of the iterator.
+  underlying_object: JSReceiver|Null|Undefined;
+  underlying_next: JSAny;
 }
 
 extern class JSIteratorMapHelper extends JSIteratorHelper {
@@ -19,15 +22,23 @@ extern class JSIteratorFilterHelper extends JSIteratorHelper {
 
 extern class JSIteratorTakeHelper extends JSIteratorHelper {
   remaining: Number;
+  innerAlive: Boolean;
 }
 
 extern class JSIteratorDropHelper extends JSIteratorHelper {
   remaining: Number;
+  innerAlive: Boolean;
 }
 
 extern class JSIteratorFlatMapHelper extends JSIteratorHelper {
   mapper: Callable;
   counter: Number;
   innerIterator: iterator::IteratorRecord;
+  innerAlive: Boolean;
+}
+
+extern class JSIteratorConcatHelper extends JSIteratorHelper {
+  iterables: FixedArray;
+  current: Smi;
   innerAlive: Boolean;
 }

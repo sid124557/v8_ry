@@ -6,10 +6,13 @@
 #define V8_OBJECTS_NAME_H_
 
 #include <atomic>
+#include <iosfwd>
 
 #include "src/base/bit-field.h"
+#include "src/common/globals.h"
 #include "src/objects/objects.h"
 #include "src/objects/primitive-heap-object.h"
+#include "src/utils/utils.h"
 #include "torque-generated/bit-fields.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -20,13 +23,64 @@ namespace internal {
 
 namespace compiler {
 class WasmGraphBuilder;
+namespace turboshaft {
+class AccessBuilderTS;
+}
+}
+
+namespace maglev {
+class MaglevGraphBuilder;
+struct VirtualNameShape;
 }
 
 class SharedStringAccessGuardIfNeeded;
 
+// The privateness kind of a symbol.
+enum class PrivateSymbolKind : uint8_t {
+  // Public == not private.
+  //
+  // This will be well-known symbols (e.g. Symbol.iterator) and user-generated
+  // symbols (e.g. new Symbol). Keyed lookup works the same as for strings.
+  kPublic,
+
+  // The remaining symbol kinds are private. Private symbols can only be used to
+  // designate own properties of objects.
+
+  // Internal private symbols, used by V8 for various reasons, e.g. as pseudo
+  // names for transitions, or storing internal slots.
+  //
+  // Internal symbols do not throw on missing property access.
+  kInternal,
+
+  // Private field name symbols represent private fields in classes, i.e.
+  //
+  //   class C {
+  //     #private = 1;
+  //     get_value() {
+  //       return this.#private;
+  //     }
+  //   }
+  //
+  // Private names throw on missing property access.
+  kFieldName,
+
+  // Brand symbols are similar to private field name symbols, but are used for
+  // validating access to private methods and storing information about the
+  // private methods.
+  //
+  // This is an optimisation relative to the spec, which would insert one
+  // private symbol per name onto the instance. Brands are expected to behave
+  // the same as private field names, aside from not being directly accessible
+  // from user code, and not emitted in lists of private fields.
+  kBrand,
+};
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           PrivateSymbolKind kind);
+
 // The Name abstract class captures anything that can be used as a property
 // name, i.e., strings and symbols.  All names store a hash value.
-V8_OBJECT class Name : public PrimitiveHeapObjectLayout {
+V8_OBJECT class Name : public PrimitiveHeapObject {
  public:
   // Tells whether the hash code has been computed.
   // Note: Use TryGetHash() whenever you want to use the hash, instead of a
@@ -67,10 +121,11 @@ V8_OBJECT class Name : public PrimitiveHeapObjectLayout {
 
   // Equality operations.
   inline bool Equals(Tagged<Name> other);
-  inline static bool Equals(Isolate* isolate, Handle<Name> one,
-                            Handle<Name> two);
+  inline static bool Equals(Isolate* isolate, DirectHandle<Name> one,
+                            DirectHandle<Name> two);
 
   // Conversion.
+  inline bool IsArrayIndex();
   inline bool AsArrayIndex(uint32_t* index);
   inline bool AsIntegerIndex(size_t* index);
 
@@ -81,27 +136,23 @@ V8_OBJECT class Name : public PrimitiveHeapObjectLayout {
   // that don't have the flag.
   inline bool IsInteresting(Isolate* isolate);
 
-  // If the name is private, it can only name own properties.
-  inline bool IsPrivate();
+  // If the name is private, it can only name own properties. This is any
+  // private kind, see PrivateSymbolKind.
+  inline bool IsAnyPrivate();
 
-  // If the name is a private name, it should behave like a private
-  // symbol but also throw on property access miss.
-  inline bool IsPrivateName();
-
-  // If the name is a private brand, it should behave like a private name
-  // symbol but is filtered out when generating list of private fields.
+  inline bool IsPrivateInternal();
+  inline bool IsAnyPrivateName();
   inline bool IsPrivateBrand();
 
   static inline bool ContainsCachedArrayIndex(uint32_t hash);
 
   // Return a string version of this name that is converted according to the
   // rules described in ES6 section 9.2.11.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ToFunctionName(
-      Isolate* isolate, Handle<Name> name);
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ToFunctionName(
-      Isolate* isolate, Handle<Name> name, Handle<String> prefix);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ToFunctionName(
+      Isolate* isolate, DirectHandle<Name> name);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ToFunctionName(
+      Isolate* isolate, DirectHandle<Name> name, DirectHandle<String> prefix);
 
-  DECL_CAST(Name)
   DECL_VERIFIER(Name)
   DECL_PRINTER(Name)
   void NameShortPrint();
@@ -143,9 +194,12 @@ V8_OBJECT class Name : public PrimitiveHeapObjectLayout {
   // Array index strings this short can keep their index in the hash field.
   static const int kMaxCachedArrayIndexLength = 7;
 
+  static const uint32_t kMaxArrayIndex = kMaxUInt32 - 1;
   // Maximum number of characters to consider when trying to convert a string
   // value into an array index.
   static const int kMaxArrayIndexSize = 10;
+  static_assert(TenToThe(kMaxArrayIndexSize) >= kMaxArrayIndex);
+  static_assert(TenToThe(kMaxArrayIndexSize - 1) < kMaxArrayIndex);
   // Maximum number of characters in a string that can possibly be an
   // "integer index" in the spec sense, i.e. a canonical representation of a
   // number in the range up to MAX_SAFE_INTEGER. We parse these into a size_t,
@@ -220,10 +274,12 @@ V8_OBJECT class Name : public PrimitiveHeapObjectLayout {
   friend class V8HeapExplorer;
   friend class CodeStubAssembler;
   friend class StringBuiltinsAssembler;
+  friend class SandboxTesting;
+  friend class maglev::MaglevGraphBuilder;
   friend class maglev::MaglevAssembler;
+  friend struct maglev::VirtualNameShape;
   friend class compiler::AccessBuilder;
   friend class compiler::WasmGraphBuilder;
-  template <typename D, typename P>
   friend class TorqueGeneratedNameAsserts;
 
   inline uint32_t GetRawHashFromForwardingTable(uint32_t raw_hash) const;
@@ -237,21 +293,30 @@ inline bool IsUniqueName(Tagged<Name> obj, PtrComprCageBase cage_base);
 // ES6 symbols.
 V8_OBJECT class Symbol : public Name {
  public:
-  using IsPrivateBit = base::BitField<bool, 0, 1>;
-  using IsWellKnownSymbolBit = IsPrivateBit::Next<bool, 1>;
+  using PrivateSymbolKindBits = base::BitField<PrivateSymbolKind, 0, 2>;
+  using IsWellKnownSymbolBit = PrivateSymbolKindBits::Next<bool, 1>;
   using IsInPublicSymbolTableBit = IsWellKnownSymbolBit::Next<bool, 1>;
   using IsInterestingSymbolBit = IsInPublicSymbolTableBit::Next<bool, 1>;
-  using IsPrivateNameBit = IsInterestingSymbolBit::Next<bool, 1>;
-  using IsPrivateBrandBit = IsPrivateNameBit::Next<bool, 1>;
 
   inline Tagged<PrimitiveHeapObject> description() const;
   inline void set_description(Tagged<PrimitiveHeapObject> value,
                               WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline void set_private_symbol_kind(PrivateSymbolKind kind);
 
-  // [is_private]: Whether this is a private symbol.  Private symbols can only
-  // be used to designate own properties of objects.
-  inline bool is_private() const;
-  inline void set_is_private(bool value);
+  // [is_any_private]: Whether this is any kind of private symbol.
+  inline bool is_any_private() const;
+
+  // [is_private_internal]: Whether this is an internal private symbol.
+  inline bool is_private_internal() const;
+
+  // [is_any_private_name]: Whether this is any private name (either field name
+  // or brand).
+  inline bool is_any_private_name() const;
+
+  // [is_private_brand]: Whether this is a brand symbol.
+  inline bool is_private_brand() const;
+
+  inline PrivateSymbolKind private_symbol_kind() const;
 
   // [is_well_known_symbol]: Whether this is a spec-defined well-known symbol,
   // or not. Well-known symbols do not throw when an access check fails during
@@ -272,24 +337,6 @@ V8_OBJECT class Symbol : public Name {
   inline bool is_in_public_symbol_table() const;
   inline void set_is_in_public_symbol_table(bool value);
 
-  // [is_private_name]: Whether this is a private name.  Private names
-  // are the same as private symbols except they throw on missing
-  // property access.
-  //
-  // This also sets the is_private bit.
-  inline bool is_private_name() const;
-  inline void set_is_private_name();
-
-  // [is_private_name]: Whether this is a brand symbol.  Brand symbols are
-  // private name symbols that are used for validating access to
-  // private methods and storing information about the private methods.
-  //
-  // This also sets the is_private bit.
-  inline bool is_private_brand() const;
-  inline void set_is_private_brand();
-
-  DECL_CAST(Symbol)
-
   // Dispatched behavior.
   DECL_PRINTER(Symbol)
   DECL_VERIFIER(Symbol)
@@ -303,8 +350,8 @@ V8_OBJECT class Symbol : public Name {
   friend class V8HeapExplorer;
   friend class CodeStubAssembler;
   friend class maglev::MaglevAssembler;
-  template <typename D, typename P>
   friend class TorqueGeneratedSymbolAsserts;
+  friend class compiler::turboshaft::AccessBuilderTS;
 
   // TODO(cbruni): remove once the new maptracer is in place.
   friend class Name;  // For PrivateSymbolToName.

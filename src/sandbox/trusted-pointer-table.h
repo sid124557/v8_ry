@@ -8,18 +8,19 @@
 #include "include/v8config.h"
 #include "src/base/atomicops.h"
 #include "src/base/memory.h"
-#include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
 #include "src/sandbox/external-entity-table.h"
 #include "src/sandbox/indirect-pointer-tag.h"
+#include "src/sandbox/tagged-payload.h"
 
 #ifdef V8_ENABLE_SANDBOX
 
 namespace v8 {
 namespace internal {
 
-class Isolate;
 class Counters;
+class Isolate;
+class TrustedPointerPublishingScope;
 
 /**
  * The entries of a TrustedPointerTable.
@@ -29,19 +30,35 @@ class Counters;
 struct TrustedPointerTableEntry {
   // Make this entry a "regular" entry, containing an absolute pointer to a
   // TrustedObject.
-  inline void MakeTrustedPointerEntry(Address value, bool mark_as_alive);
+  inline void MakeTrustedPointerEntry(Address pointer, IndirectPointerTag tag,
+                                      bool mark_as_alive);
 
   // Make this entry a freelist entry, containing the index of the next entry
   // on the freelist.
   inline void MakeFreelistEntry(uint32_t next_entry_index);
 
-  // Retrieve the pointer stored in this entry.
-  // This entry must not be a freelist entry.
-  inline Address GetContent() const;
+  // Make this entry a zapped entry. Zapped entries contain invalid pointers.
+  inline void MakeZappedEntry();
 
-  // Store the given pointer in this entry.
+  // Retrieve the pointer stored in this entry. This entry must be tagged with
+  // the given tag, otherwise an inaccessible pointer will be returned.
   // This entry must not be a freelist entry.
-  inline void SetContent(Address value);
+  inline Address GetPointer(IndirectPointerTag tag) const;
+
+  // Store the given pointer in this entry while preserving the marking state.
+  // This entry must not be a freelist entry.
+  inline void SetPointer(Address pointer, IndirectPointerTag tag);
+
+  // Returns true if this entry contains a pointer with the given tag.
+  inline bool HasPointer(IndirectPointerTag tag) const;
+
+  // Unpublish this entry by setting its tag to kUnpublishedIndirectPointerTag.
+  // This way, the entry (and the object referenced by it) will not be
+  // accessible from within the sandbox.
+  inline void Unpublish();
+
+  // Publish a currently unpublished entry by setting its tag to the given one.
+  inline void Publish(IndirectPointerTag tag);
 
   // Returns true if this entry is a freelist entry.
   inline bool IsFreelistEntry() const;
@@ -61,26 +78,50 @@ struct TrustedPointerTableEntry {
   // Test whether this entry is currently marked as alive.
   inline bool IsMarked() const;
 
+  static constexpr bool IsWriteProtected = false;
+
  private:
   friend class TrustedPointerTable;
 
-  // Freelist entries contain the index of the next free entry in their lower 32
-  // bits and this tag in the upper 32 bits.
-  static constexpr Address kFreeEntryTag = 0xffffffffULL << 32;
+  // Read the pointer without checking the tag. Use with care!
+  inline Address GetPointerUnchecked() const;
 
-  // The marking bit is stored in the content_ field, see below.
-  static constexpr Address kMarkingBit = 1;
+  // TrustedPointerTable entries consist of a single pointer-sized word
+  // containing a tag and marking bit together with the actual pointer.
+  struct TrustedPointerTaggingScheme {
+    using TagType = IndirectPointerTag;
+    static constexpr uint64_t kMarkBit = kTrustedPointerTableMarkBit;
+    static constexpr uint64_t kTagMask = kIndirectPointerTagMask;
+    static constexpr TagType kFreeEntryTag = kFreeTrustedPointerTableEntryTag;
+    static constexpr bool kSupportsEvacuation = false;
+    static constexpr bool kSupportsZapping = false;
+  };
 
-  // The pointer to the TrustedObject stored in this entry. Also contains the
-  // marking bit: since this is a tagged pointer to a V8 HeapObject, we know
-  // that it will be 4-byte aligned and that the LSB should always be set. We
-  // therefore use the LSB as marking bit. In this way:
-  //  - When loading the pointer, we only need to perform an unconditional OR 1
-  //    to get the correctly tagged pointer
-  //  - When storing the pointer we don't need to do anything since the tagged
-  //    pointer will automatically be marked
-  static_assert(kMarkingBit == kHeapObjectTag);
-  std::atomic<Address> content_;
+  struct Payload : TaggedPayloadDeprecated<TrustedPointerTaggingScheme> {
+    static Payload ForTrustedPointerEntry(Address pointer,
+                                          IndirectPointerTag tag) {
+      // We expect to only store references to (trusted) HeapObjects in the
+      // TrustedPointerTable, so the HeapObject tag bit must be set.
+      DCHECK_EQ(pointer & kHeapObjectTag, kHeapObjectTag);
+      DCHECK_EQ(pointer & kTrustedPointerTableMarkBit, 0);
+      DCHECK_EQ(pointer & kIndirectPointerTagMask, 0);
+      return Payload(pointer, tag);
+    }
+
+    static Payload ForFreelistEntry(uint32_t next_entry) {
+      return Payload(next_entry, kFreeTrustedPointerTableEntryTag);
+    }
+
+    static Payload ForZappedEntry() {
+      return Payload(0, kIndirectPointerNullTag);
+    }
+
+   private:
+    Payload(Address pointer, IndirectPointerTag tag)
+        : TaggedPayloadDeprecated(pointer, tag) {}
+  };
+
+  std::atomic<Payload> payload_;
 };
 
 static_assert(sizeof(TrustedPointerTableEntry) ==
@@ -104,23 +145,24 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
     : public ExternalEntityTable<TrustedPointerTableEntry,
                                  kTrustedPointerTableReservationSize> {
  public:
-  // Size of a TrustedPointerTable, for layout computation in IsolateData.
-  static int constexpr kSize = 2 * kSystemPointerSize;
   static_assert(kMaxTrustedPointers == kMaxCapacity);
+  static_assert(!kSupportsCompaction);
 
   TrustedPointerTable() = default;
   TrustedPointerTable(const TrustedPointerTable&) = delete;
   TrustedPointerTable& operator=(const TrustedPointerTable&) = delete;
 
   // The Spaces used by a TrustedPointerTable.
-  using Space = ExternalEntityTable<
-      TrustedPointerTableEntry,
-      kTrustedPointerTableReservationSize>::SpaceWithBlackAllocationSupport;
+  using Space = ExternalEntityTable<TrustedPointerTableEntry,
+                                    kTrustedPointerTableReservationSize>::Space;
 
   // Retrieves the content of the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
-  inline Address Get(TrustedPointerHandle handle) const;
+  inline Address Get(TrustedPointerHandle handle, IndirectPointerTag tag) const;
+  // Allows kUnpublishedIndirectPointerTag in addition to the specified {tag}.
+  inline Address GetMaybeUnpublished(TrustedPointerHandle handle,
+                                     IndirectPointerTag tag) const;
 
   // Sets the content of the entry referenced by the given handle.
   //
@@ -132,7 +174,8 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
   //
   // This method is atomic and can be called from background threads.
   inline TrustedPointerHandle AllocateAndInitializeEntry(
-      Space* space, Address pointer, IndirectPointerTag tag);
+      Space* space, Address pointer, IndirectPointerTag tag,
+      TrustedPointerPublishingScope* scope);
 
   // Marks the specified entry as alive.
   //
@@ -146,6 +189,21 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
   //
   // Returns the number of live entries after sweeping.
   uint32_t Sweep(Space* space, Counters* counters);
+
+  // Zaps the content of the entry referenced by the given handle.
+  //
+  // Accessing a zapped entry will return an invalid pointer.
+  inline void Zap(TrustedPointerHandle handle);
+
+  // Publish the entry referenced by the given handle.
+  //
+  // The specified entry must currently be unpublished, and is therefore
+  // inaccessible from within the sandbox. Calling this method will make the
+  // entry accessible.
+  inline void Publish(TrustedPointerHandle handle, IndirectPointerTag tag);
+
+  // Checks whether the given entry currently has the "unpublished" tag.
+  inline bool IsUnpublished(TrustedPointerHandle handle) const;
 
   // Iterate over all active entries in the given space.
   //
@@ -165,8 +223,6 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
   // Ensure that the value is valid before storing it into this table.
   inline void Validate(Address pointer, IndirectPointerTag tag);
 };
-
-static_assert(sizeof(TrustedPointerTable) == TrustedPointerTable::kSize);
 
 }  // namespace internal
 }  // namespace v8

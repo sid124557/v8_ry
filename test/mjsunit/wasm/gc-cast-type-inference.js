@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 (function TestRefCastNullReturnsNullTypeForNonNullInput() {
@@ -80,7 +78,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     kExprBlock, kWasmRefNull, kI31RefCode,
       kExprLocalGet, 0,
       kGCPrefix, kExprAnyConvertExtern,
-      kGCPrefix, kExprBrOnCastGeneric, 0b11, 0, kAnyRefCode, kI31RefCode,
+      kGCPrefix, kExprBrOnCast, 0b11, 0, kAnyRefCode, kI31RefCode,
       // As null branches, the type here is guaranteed to be non-null.
       kExprCallFunction, consumeNonNull.index,
       kExprI32Const, 0,
@@ -97,7 +95,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     kExprBlock, kWasmRef, kI31RefCode,
       kExprLocalGet, 0,
       kGCPrefix, kExprAnyConvertExtern,
-      kGCPrefix, kExprBrOnCastGeneric, 0b01, 0, kAnyRefCode, kI31RefCode,
+      kGCPrefix, kExprBrOnCast, 0b01, 0, kAnyRefCode, kI31RefCode,
       kExprDrop,
       kExprI32Const, 0,
       kExprReturn,
@@ -135,7 +133,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     kExprBlock, kWasmRefNull, kAnyRefCode,
       kExprLocalGet, 0,
       kGCPrefix, kExprAnyConvertExtern,
-      kGCPrefix, kExprBrOnCastFailGeneric, 0b01, 0, kAnyRefCode, kI31RefCode,
+      kGCPrefix, kExprBrOnCastFail, 0b01, 0, kAnyRefCode, kI31RefCode,
       // As null branches, the type here is guaranteed to be non-null.
       kExprCallFunction, i31ToI32.index,
       kExprReturn,
@@ -152,7 +150,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     kExprBlock, kWasmRef, kAnyRefCode,
       kExprLocalGet, 0,
       kGCPrefix, kExprAnyConvertExtern,
-      kGCPrefix, kExprBrOnCastFailGeneric, 0b11, 0, kAnyRefCode, kI31RefCode,
+      kGCPrefix, kExprBrOnCastFail, 0b11, 0, kAnyRefCode, kI31RefCode,
       kGCPrefix, kExprI31GetS,
       kExprReturn,
     kExprEnd,

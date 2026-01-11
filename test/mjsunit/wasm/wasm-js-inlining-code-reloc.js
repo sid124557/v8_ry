@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --allow-natives-syntax --turbofan
-// Flags: --no-always-turbofan --no-always-sparkplug --expose-gc
-// Flags: --stress-compaction --experimental-wasm-js-inlining
+// Flags: --allow-natives-syntax --turbofan --stress-compaction
+// Flags: --no-always-sparkplug --expose-gc
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 

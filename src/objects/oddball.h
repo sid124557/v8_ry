@@ -14,7 +14,7 @@ namespace v8 {
 namespace internal {
 
 // The Oddball describes objects null, undefined, true, and false.
-V8_OBJECT class Oddball : public PrimitiveHeapObjectLayout {
+V8_OBJECT class Oddball : public PrimitiveHeapObject {
  public:
   // [to_number_raw]: Cached raw to_number computed at startup.
   DECL_PRIMITIVE_ACCESSORS(to_number_raw, double)
@@ -26,8 +26,8 @@ V8_OBJECT class Oddball : public PrimitiveHeapObjectLayout {
                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [to_number]: Cached to_number computed at startup.
-  inline Tagged<Object> to_number() const;
-  inline void set_to_number(Tagged<Object> value,
+  inline Tagged<Number> to_number() const;
+  inline void set_to_number(Tagged<Number> value,
                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [typeof]: Cached type_of computed at startup.
@@ -39,17 +39,15 @@ V8_OBJECT class Oddball : public PrimitiveHeapObjectLayout {
   inline void set_kind(uint8_t kind);
 
   // ES6 section 7.1.3 ToNumber for Boolean, Null, Undefined.
-  V8_WARN_UNUSED_RESULT static inline Handle<Object> ToNumber(
-      Isolate* isolate, Handle<Oddball> input);
-
-  DECL_CAST(Oddball)
+  V8_WARN_UNUSED_RESULT static inline Handle<Number> ToNumber(
+      Isolate* isolate, DirectHandle<Oddball> input);
 
   // Dispatched behavior.
   DECL_VERIFIER(Oddball)
 
   // Initialize the fields.
-  static void Initialize(Isolate* isolate, Handle<Oddball> oddball,
-                         const char* to_string, Handle<Object> to_number,
+  static void Initialize(Isolate* isolate, DirectHandle<Oddball> oddball,
+                         const char* to_string, DirectHandle<Number> to_number,
                          const char* type_of, uint8_t kind);
 
   static constexpr uint8_t kFalse = 0;
@@ -66,12 +64,13 @@ V8_OBJECT class Oddball : public PrimitiveHeapObjectLayout {
   friend class CodeStubAssembler;
   friend class maglev::MaglevAssembler;
   friend class compiler::AccessBuilder;
-  template <typename D, typename P>
   friend class TorqueGeneratedOddballAsserts;
+  template <typename>
+  friend class StringBuiltinsReducer;
 
   UnalignedDoubleMember to_number_raw_;
   TaggedMember<String> to_string_;
-  TaggedMember<Object> to_number_;
+  TaggedMember<Number> to_number_;
   TaggedMember<String> type_of_;
   TaggedMember<Smi> kind_;
 } V8_OBJECT_END;
@@ -79,7 +78,7 @@ V8_OBJECT class Oddball : public PrimitiveHeapObjectLayout {
 template <>
 struct ObjectTraits<Oddball> {
   using BodyDescriptor =
-      FixedBodyDescriptor<offsetof(Oddball, to_number_raw_),
+      FixedBodyDescriptor<offsetof(Oddball, to_string_),
                           offsetof(Oddball, kind_), sizeof(Oddball)>;
 
   static_assert(offsetof(Oddball, kind_) == Internals::kOddballKindOffset);
@@ -88,35 +87,20 @@ struct ObjectTraits<Oddball> {
 };
 
 V8_OBJECT class Null : public Oddball {
- public:
-  inline Null();
-  DECL_CAST(Null)
 } V8_OBJECT_END;
 
 V8_OBJECT class Undefined : public Oddball {
- public:
-  inline Undefined();
-  DECL_CAST(Undefined)
 } V8_OBJECT_END;
 
 V8_OBJECT class Boolean : public Oddball {
  public:
-  inline Boolean();
-  DECL_CAST(Boolean)
-
   V8_INLINE bool ToBool(Isolate* isolate) const;
 } V8_OBJECT_END;
 
 V8_OBJECT class True : public Boolean {
- public:
-  inline True();
-  DECL_CAST(True)
 } V8_OBJECT_END;
 
 V8_OBJECT class False : public Boolean {
- public:
-  inline False();
-  DECL_CAST(False)
 } V8_OBJECT_END;
 
 }  // namespace internal

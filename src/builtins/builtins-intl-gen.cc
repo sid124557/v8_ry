@@ -17,6 +17,8 @@
 namespace v8 {
 namespace internal {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 class IntlBuiltinsAssembler : public CodeStubAssembler {
  public:
   explicit IntlBuiltinsAssembler(compiler::CodeAssemblerState* state)
@@ -26,20 +28,18 @@ class IntlBuiltinsAssembler : public CodeStubAssembler {
                         Runtime::FunctionId format_func_id,
                         const char* method_name);
 
-  TNode<JSArray> AllocateEmptyJSArray(TNode<Context> context);
-
   TNode<IntPtrT> PointerToSeqStringData(TNode<String> seq_string) {
     CSA_DCHECK(this,
                IsSequentialStringInstanceType(LoadInstanceType(seq_string)));
-    static_assert(offsetof(SeqOneByteString, chars_) ==
-                  offsetof(SeqTwoByteString, chars_));
-    return IntPtrAdd(
-        BitcastTaggedToWord(seq_string),
-        IntPtrConstant(offsetof(SeqOneByteString, chars_) - kHeapObjectTag));
+    static_assert(OFFSET_OF_DATA_START(SeqOneByteString) ==
+                  OFFSET_OF_DATA_START(SeqTwoByteString));
+    return IntPtrAdd(BitcastTaggedToWord(seq_string),
+                     IntPtrConstant(OFFSET_OF_DATA_START(SeqOneByteString) -
+                                    kHeapObjectTag));
   }
 
   TNode<Uint8T> GetChar(TNode<SeqOneByteString> seq_string, int index) {
-    size_t effective_offset = offsetof(SeqOneByteString, chars_) +
+    size_t effective_offset = OFFSET_OF_DATA_START(SeqOneByteString) +
                               sizeof(SeqOneByteString::Char) * index -
                               kHeapObjectTag;
     return Load<Uint8T>(seq_string, IntPtrConstant(effective_offset));
@@ -50,7 +50,7 @@ class IntlBuiltinsAssembler : public CodeStubAssembler {
   void JumpIfStartsWithIgnoreCase(TNode<SeqOneByteString> seq_string,
                                   const char* pattern, Label* target) {
     size_t effective_offset =
-        offsetof(SeqOneByteString, chars_) - kHeapObjectTag;
+        OFFSET_OF_DATA_START(SeqOneByteString) - kHeapObjectTag;
     TNode<Uint16T> raw =
         Load<Uint16T>(seq_string, IntPtrConstant(effective_offset));
     DCHECK_EQ(strlen(pattern), 2);
@@ -75,16 +75,28 @@ class IntlBuiltinsAssembler : public CodeStubAssembler {
     kToLocaleLowerCase,
   };
   void ToLowerCaseImpl(TNode<String> string, TNode<Object> maybe_locales,
-                       TNode<Context> context, ToLowerCaseKind kind,
-                       std::function<void(TNode<Object>)> ReturnFct);
+                       TNode<ContextOrEmptyContext> context,
+                       ToLowerCaseKind kind,
+                       std::function<void(TNode<JSAny>)> ReturnFct);
 };
 
 TF_BUILTIN(StringToLowerCaseIntl, IntlBuiltinsAssembler) {
-  const auto string = Parameter<String>(Descriptor::kString);
-  ToLowerCaseImpl(string, TNode<Object>() /*maybe_locales*/, TNode<Context>(),
+  auto context = Parameter<ContextOrEmptyContext>(Descriptor::kContext);
+  auto string = Parameter<String>(Descriptor::kString);
+  ToLowerCaseImpl(string, TNode<Object>() /*maybe_locales*/, context,
                   ToLowerCaseKind::kToLowerCase,
                   [this](TNode<Object> ret) { Return(ret); });
 }
+
+#if V8_ENABLE_WEBASSEMBLY
+TF_BUILTIN(WasmStringToLowerCaseIntl, IntlBuiltinsAssembler) {
+  auto context = Parameter<ContextOrEmptyContext>(Descriptor::kContext);
+  auto string = Parameter<String>(Descriptor::kString);
+  ToLowerCaseImpl(string, TNode<Object>() /*maybe_locales*/, context,
+                  ToLowerCaseKind::kToLowerCase,
+                  [this](TNode<Object> ret) { Return(ret); });
+}
+#endif
 
 TF_BUILTIN(StringPrototypeToLowerCaseIntl, IntlBuiltinsAssembler) {
   auto maybe_string = Parameter<Object>(Descriptor::kReceiver);
@@ -107,12 +119,13 @@ TF_BUILTIN(StringPrototypeToLocaleLowerCase, IntlBuiltinsAssembler) {
       ToThisString(context, maybe_string, "String.prototype.toLocaleLowerCase");
   ToLowerCaseImpl(string, maybe_locales, context,
                   ToLowerCaseKind::kToLocaleLowerCase,
-                  [&args](TNode<Object> ret) { args.PopAndReturn(ret); });
+                  [&args](TNode<JSAny> ret) { args.PopAndReturn(ret); });
 }
 
 void IntlBuiltinsAssembler::ToLowerCaseImpl(
-    TNode<String> string, TNode<Object> maybe_locales, TNode<Context> context,
-    ToLowerCaseKind kind, std::function<void(TNode<Object>)> ReturnFct) {
+    TNode<String> string, TNode<Object> maybe_locales,
+    TNode<ContextOrEmptyContext> context, ToLowerCaseKind kind,
+    std::function<void(TNode<JSAny>)> ReturnFct) {
   Label call_c(this), return_string(this), runtime(this, Label::kDeferred);
 
   // Unpack strings if possible, and bail to runtime unless we get a one-byte
@@ -157,11 +170,8 @@ void IntlBuiltinsAssembler::ToLowerCaseImpl(
   const TNode<Uint32T> length = LoadStringLengthAsWord32(string);
   GotoIf(Word32Equal(length, Uint32Constant(0)), &return_string);
 
-  const TNode<Int32T> instance_type = to_direct.instance_type();
-  CSA_DCHECK(this,
-             Word32BinaryNot(IsIndirectStringInstanceType(instance_type)));
-
-  GotoIfNot(IsOneByteStringInstanceType(instance_type), &runtime);
+  const TNode<BoolT> is_one_byte = to_direct.IsOneByte();
+  GotoIfNot(is_one_byte, &runtime);
 
   // For short strings, do the conversion in CSA through the lookup table.
 
@@ -233,12 +243,12 @@ void IntlBuiltinsAssembler::ToLowerCaseImpl(
 
   BIND(&runtime);
   if (kind == ToLowerCaseKind::kToLocaleLowerCase) {
-    ReturnFct(CallRuntime(Runtime::kStringToLocaleLowerCase, context, string,
-                          maybe_locales));
+    ReturnFct(CallRuntime<JSAny>(Runtime::kStringToLocaleLowerCase, context,
+                                 string, maybe_locales));
   } else {
     DCHECK_EQ(kind, ToLowerCaseKind::kToLowerCase);
-    ReturnFct(CallRuntime(Runtime::kStringToLowerCaseIntl, NoContextConstant(),
-                          string));
+    ReturnFct(
+        CallRuntime<JSAny>(Runtime::kStringToLowerCaseIntl, context, string));
   }
 }
 
@@ -266,16 +276,8 @@ void IntlBuiltinsAssembler::ListFormatCommon(TNode<Context> context,
 
     // 6. Return ? FormatList(lf, stringList).
     args.PopAndReturn(
-        CallRuntime(format_func_id, context, list_format, string_list));
+        CallRuntime<JSAny>(format_func_id, context, list_format, string_list));
   }
-}
-
-TNode<JSArray> IntlBuiltinsAssembler::AllocateEmptyJSArray(
-    TNode<Context> context) {
-  return CodeStubAssembler::AllocateJSArray(
-      PACKED_ELEMENTS,
-      LoadJSArrayElementsMap(PACKED_ELEMENTS, LoadNativeContext(context)),
-      IntPtrConstant(0), SmiConstant(0));
 }
 
 TF_BUILTIN(ListFormatPrototypeFormat, IntlBuiltinsAssembler) {
@@ -291,6 +293,8 @@ TF_BUILTIN(ListFormatPrototypeFormatToParts, IntlBuiltinsAssembler) {
       UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount),
       Runtime::kFormatListToParts, "Intl.ListFormat.prototype.formatToParts");
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

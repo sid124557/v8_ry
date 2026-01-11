@@ -8,8 +8,8 @@
 #include "include/v8config.h"
 #include "src/base/atomicops.h"
 #include "src/base/memory.h"
-#include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
+#include "src/sandbox/code-entrypoint-tag.h"
 #include "src/sandbox/external-entity-table.h"
 
 #ifdef V8_COMPRESS_POINTERS
@@ -27,10 +27,14 @@ class Counters;
  * the Code's entrypoint.
  */
 struct CodePointerTableEntry {
+  // We write-protect the CodePointerTable on platforms that support it for
+  // forward-edge CFI.
+  static constexpr bool IsWriteProtected = true;
+
   // Make this entry a code pointer entry for the given code object and
   // entrypoint.
   inline void MakeCodePointerEntry(Address code, Address entrypoint,
-                                   bool mark_as_alive);
+                                   CodeEntrypointTag tag, bool mark_as_alive);
 
   // Make this entry a freelist entry, containing the index of the next entry
   // on the freelist.
@@ -38,11 +42,11 @@ struct CodePointerTableEntry {
 
   // Load code entrypoint pointer stored in this entry.
   // This entry must be a code pointer entry.
-  inline Address GetEntrypoint() const;
+  inline Address GetEntrypoint(CodeEntrypointTag tag) const;
 
   // Store the given code entrypoint pointer in this entry.
   // This entry must be a code pointer entry.
-  inline void SetEntrypoint(Address value);
+  inline void SetEntrypoint(Address value, CodeEntrypointTag tag);
 
   // Load the code object pointer stored in this entry.
   // This entry must be a code pointer entry.
@@ -74,8 +78,8 @@ struct CodePointerTableEntry {
   friend class CodePointerTable;
 
   // Freelist entries contain the index of the next free entry in their lower 32
-  // bits and this tag in the upper 32 bits.
-  static constexpr Address kFreeEntryTag = 0xffffffffULL << 32;
+  // bits and are tagged with the kFreeCodePointerTableEntryTag.
+  static constexpr Address kFreeEntryTag = kFreeCodePointerTableEntryTag;
 
   // The marking bit is stored in the code_ field, see below.
   static constexpr Address kMarkingBit = 1;
@@ -114,23 +118,25 @@ static_assert(sizeof(CodePointerTableEntry) == kCodePointerTableEntrySize);
 class V8_EXPORT_PRIVATE CodePointerTable
     : public ExternalEntityTable<CodePointerTableEntry,
                                  kCodePointerTableReservationSize> {
+  using Base = ExternalEntityTable<CodePointerTableEntry,
+                                   kCodePointerTableReservationSize>;
+
  public:
-  // Size of a CodePointerTable, for layout computation in IsolateData.
-  static int constexpr kSize = 2 * kSystemPointerSize;
   static_assert(kMaxCodePointers == kMaxCapacity);
+  static_assert(!kSupportsCompaction);
 
   CodePointerTable() = default;
   CodePointerTable(const CodePointerTable&) = delete;
   CodePointerTable& operator=(const CodePointerTable&) = delete;
 
   // The Spaces used by a CodePointerTable.
-  using Space = ExternalEntityTable<
-      CodePointerTableEntry,
-      kCodePointerTableReservationSize>::SpaceWithBlackAllocationSupport;
+  using Space = Base::Space;
 
+  // Retrieves the entrypoint of the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
-  inline Address GetEntrypoint(CodePointerHandle handle) const;
+  inline Address GetEntrypoint(CodePointerHandle handle,
+                               CodeEntrypointTag tag) const;
 
   // Retrieves the code object of the entry referenced by the given handle.
   //
@@ -140,7 +146,8 @@ class V8_EXPORT_PRIVATE CodePointerTable
   // Sets the entrypoint of the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
-  inline void SetEntrypoint(CodePointerHandle handle, Address value);
+  inline void SetEntrypoint(CodePointerHandle handle, Address value,
+                            CodeEntrypointTag tag);
 
   // Sets the code object of the entry referenced by the given handle.
   //
@@ -152,7 +159,8 @@ class V8_EXPORT_PRIVATE CodePointerTable
   // This method is atomic and can be called from background threads.
   inline CodePointerHandle AllocateAndInitializeEntry(Space* space,
                                                       Address code,
-                                                      Address entrypoint);
+                                                      Address entrypoint,
+                                                      CodeEntrypointTag tag);
 
   // Marks the specified entry as alive.
   //
@@ -182,10 +190,6 @@ class V8_EXPORT_PRIVATE CodePointerTable
   inline uint32_t HandleToIndex(CodePointerHandle handle) const;
   inline CodePointerHandle IndexToHandle(uint32_t index) const;
 };
-
-static_assert(sizeof(CodePointerTable) == CodePointerTable::kSize);
-
-V8_EXPORT_PRIVATE CodePointerTable* GetProcessWideCodePointerTable();
 
 }  // namespace internal
 }  // namespace v8

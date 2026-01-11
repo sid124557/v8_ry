@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 (function TestArrayFillImmutable() {
@@ -22,7 +20,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
     .exportFunc();
 
   assertThrows(() => builder.instantiate(), WebAssembly.CompileError,
-               /immediate array type #0 is immutable/);
+               /Array type #0 is immutable/);
 })();
 
 (function TestArrayFill() {
@@ -157,7 +155,8 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   builder.addMemory(10, 10);
 
   let passive = builder.addPassiveDataSegment([0, 1, 2, 3, 4, 5]);
-  let active = builder.addDataSegment(0, [6, 7, 8, 9]);
+  let active = builder.addActiveDataSegment(0, [kExprI32Const, 0],
+                                            [6, 7, 8, 9]);
 
   builder.addFunction(
       "make_array", makeSig([kWasmI32], [wasmRefType(array)]))

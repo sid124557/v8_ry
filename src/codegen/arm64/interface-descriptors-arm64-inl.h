@@ -86,6 +86,21 @@ constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
 }
 
 // static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::EnumIndexRegister() {
+  return x4;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::CacheTypeRegister() {
+  return x5;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::SlotRegister() {
+  return x2;
+}
+
+// static
 constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
   return kInterpreterAccumulatorRegister;
 }
@@ -124,8 +139,6 @@ constexpr Register DefineKeyedOwnDescriptor::FlagsRegister() { return x5; }
 constexpr Register StoreTransitionDescriptor::MapRegister() { return x5; }
 
 // static
-constexpr Register ApiGetterDescriptor::HolderRegister() { return x0; }
-// static
 constexpr Register ApiGetterDescriptor::CallbackRegister() { return x3; }
 
 // static
@@ -153,6 +166,11 @@ MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::FlagsRegister() {
 constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
     FeedbackVectorRegister() {
   return x9;
+}
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::TemporaryRegister() {
+  return x5;
 }
 
 // static
@@ -288,6 +306,24 @@ constexpr auto Compare_BaselineDescriptor::registers() {
   return RegisterArray(x1, x0, x2);
 }
 
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+constexpr auto CompareAndTryPatchCodeDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: current feedback value
+  // x3: feedback offset
+  return RegisterArray(x1, x0, x2, x3);
+}
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
+
+// static
+constexpr auto Compare_WithEmbeddedFeedbackOffsetDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: feedback offset
+  return RegisterArray(x1, x0, x2);
+}
+
 // static
 constexpr auto BinaryOpDescriptor::registers() {
   // x1: left operand
@@ -322,12 +358,9 @@ CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister() {
   return x2;
 }
 // static
-constexpr Register CallApiCallbackOptimizedDescriptor::CallDataRegister() {
+constexpr Register
+CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister() {
   return x3;
-}
-// static
-constexpr Register CallApiCallbackOptimizedDescriptor::HolderRegister() {
-  return x0;
 }
 
 // static
@@ -341,12 +374,9 @@ CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
   return x1;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
+constexpr Register
+CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister() {
   return x3;
-}
-// static
-constexpr Register CallApiCallbackGenericDescriptor::HolderRegister() {
-  return x0;
 }
 
 // static

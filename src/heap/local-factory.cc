@@ -23,7 +23,7 @@ namespace internal {
 
 LocalFactory::LocalFactory(Isolate* isolate) : roots_(isolate) {}
 
-void LocalFactory::ProcessNewScript(Handle<Script> script,
+void LocalFactory::ProcessNewScript(DirectHandle<Script> script,
                                     ScriptEventType script_event_type) {
   // TODO(leszeks): Actually add the script to the main Isolate's script list,
   // in a thread-safe way.
@@ -47,23 +47,13 @@ void LocalFactory::ProcessNewScript(Handle<Script> script,
 
 Tagged<HeapObject> LocalFactory::AllocateRaw(int size,
                                              AllocationType allocation,
-                                             AllocationAlignment alignment) {
+                                             AllocationAlignment alignment,
+                                             AllocationHint hint) {
   DCHECK(allocation == AllocationType::kOld ||
          allocation == AllocationType::kSharedOld ||
          allocation == AllocationType::kTrusted);
   return HeapObject::FromAddress(isolate()->heap()->AllocateRawOrFail(
-      size, allocation, AllocationOrigin::kRuntime, alignment));
-}
-
-int LocalFactory::NumberToStringCacheHash(Tagged<Smi>) { return 0; }
-
-int LocalFactory::NumberToStringCacheHash(double) { return 0; }
-
-void LocalFactory::NumberToStringCacheSet(Handle<Object>, int, Handle<String>) {
-}
-
-Handle<Object> LocalFactory::NumberToStringCacheGet(Tagged<Object>, int) {
-  return undefined_value();
+      size, allocation, AllocationOrigin::kRuntime, alignment, hint));
 }
 
 }  // namespace internal

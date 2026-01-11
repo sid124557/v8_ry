@@ -2,19 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WELL_KNOWN_IMPORTS_H_
+#define V8_WASM_WELL_KNOWN_IMPORTS_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#ifndef V8_WASM_WELL_KNOWN_IMPORTS_H_
-#define V8_WASM_WELL_KNOWN_IMPORTS_H_
-
+#include <atomic>
 #include <memory>
 
-#include "src/base/atomicops.h"
-#include "src/base/platform/mutex.h"
 #include "src/base/vector.h"
-#include "src/common/globals.h"
 
 namespace v8::internal::wasm {
 
@@ -23,6 +21,40 @@ enum class WellKnownImport : uint8_t {
   kUninstantiated,
   kGeneric,
   kLinkError,
+
+  ////////////////////////////////////////////////////////
+  // Compile-time "builtin" imports:
+  ////////////////////////////////////////////////////////
+  kFirstCompileTimeImport,
+
+  // JS String Builtins
+  // https://github.com/WebAssembly/js-string-builtins
+  // TODO(14179): Rename some of these to reflect the new import names.
+  kStringCast = kFirstCompileTimeImport,
+  kStringCharCodeAt,
+  kStringCodePointAt,
+  kStringCompare,
+  kStringConcat,
+  kStringEquals,
+  kStringFromCharCode,
+  kStringFromCodePoint,
+  kStringFromUtf8Array,
+  kStringFromWtf16Array,
+  kStringIntoUtf8Array,
+  kStringLength,
+  kStringMeasureUtf8,
+  kStringSubstring,
+  kStringTest,
+  kStringToUtf8Array,
+  kStringToWtf16Array,
+
+  // JS Prototypes setup (Custom Descriptors proposal)
+  kConfigureAllPrototypes,
+
+  kLastCompileTimeImport = kConfigureAllPrototypes,
+  ////////////////////////////////////////////////////////
+  // End of compile-time "builtin" imports.
+  ////////////////////////////////////////////////////////
 
   // DataView methods:
   kDataViewGetBigInt64,
@@ -47,38 +79,45 @@ enum class WellKnownImport : uint8_t {
   kDataViewSetUint32,
   kDataViewByteLength,
 
+  // Math functions.
+  kMathF64Acos,
+  kMathF64Asin,
+  kMathF64Atan,
+  kMathF64Atan2,
+  kMathF64Cos,
+  kMathF64Sin,
+  kMathF64Tan,
+  kMathF64Exp,
+  kMathF64Log,
+  kMathF64Pow,
+  kMathF64Sqrt,  // Used by dart2wasm. f64.sqrt is equivalent.
+
   // String-related functions:
   kDoubleToString,
   kIntToString,
   kParseFloat,
 
-  // JS String Builtins
-  // https://github.com/WebAssembly/js-string-builtins
-  kStringCast,
-  kStringTest,
-  kStringCharCodeAt,
-  kStringCodePointAt,
-  kStringCompare,
-  kStringConcat,
-  kStringEquals,
-  kStringFromCharCode,
-  kStringFromCodePoint,
-  kStringFromWtf16Array,
-  kStringFromWtf8Array,
   kStringIndexOf,
   kStringIndexOfImported,
-  kStringLength,
-  kStringSubstring,
   kStringToLocaleLowerCaseStringref,
   kStringToLowerCaseStringref,
   kStringToLowerCaseImported,
-  kStringToWtf16Array,
+  // Fast API calls:
+  kFastAPICall,
 };
 
 class NativeModule;
 
 // For debugging/tracing.
 const char* WellKnownImportName(WellKnownImport wki);
+
+inline bool IsCompileTimeImport(WellKnownImport wki) {
+  using T = std::underlying_type_t<WellKnownImport>;
+  T num = static_cast<T>(wki);
+  constexpr T kFirst = static_cast<T>(WellKnownImport::kFirstCompileTimeImport);
+  constexpr T kLast = static_cast<T>(WellKnownImport::kLastCompileTimeImport);
+  return kFirst <= num && num <= kLast;
+}
 
 class WellKnownImportsList {
  public:
@@ -110,17 +149,17 @@ class WellKnownImportsList {
     return statuses_[index].load(std::memory_order_relaxed);
   }
 
+  // Note: you probably want to be holding the associated NativeModule's
+  // {allocation_lock_} when calling this method.
   V8_WARN_UNUSED_RESULT UpdateResult
   Update(base::Vector<WellKnownImport> entries);
 
-  // If you need this mutex and the NativeModule's allocation_mutex_, always
-  // get the latter first.
-  base::Mutex* mutex() { return &mutex_; }
-
  private:
-  // This mutex guards {statuses_}, for operations that need to ensure that
-  // they see a consistent view of {statutes_} for some period of time.
-  base::Mutex mutex_;
+  // Operations that need to ensure that they see a consistent view of
+  // {statuses_} for some period of time should use the associated
+  // NativeModule's {allocation_lock_} for that purpose (which they will
+  // likely need anyway, due to WellKnownImport statuses and published
+  // code objects needing to stay in sync).
   std::unique_ptr<std::atomic<WellKnownImport>[]> statuses_;
 
 #if DEBUG
