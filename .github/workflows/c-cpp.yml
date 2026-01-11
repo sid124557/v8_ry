@@ -32,8 +32,53 @@ jobs:
         build-mode: manual
 
     # ------------------------------
-    # Dependencies
+    # System dependencies (FIX HERE)
     # ------------------------------
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git \
+          python3 \
+          clang \
+          ninja-build \
+          lsb-release \
+          pkg-config \
+          build-essential \
+          libglib2.0-dev
+
+    - name: Setup depot_tools
+      run: |
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+    # ------------------------------
+    # gclient
+    # ------------------------------
+    - name: Configure gclient (local checkout)
+      run: |
+        gclient config --unmanaged .
+
+    - name: Sync V8 dependencies
+      run: |
+        gclient sync --no-history
+
+    # ------------------------------
+    # GN configuration (stable)
+    # ------------------------------
+    - name: Configure V8 (GN)
+      run: |
+        gn gen out/codeql \
+          --args='
+            is_debug=false
+            use_custom_libcxx=false
+            use_libcxx_modules=false
+            use_sysroot=false
+            v8_enable_i18n_support=false
+          '
+
+    # ------------------------------
+    # Build
     - name: Install build dependencies
       run: |
         sudo apt-get update
