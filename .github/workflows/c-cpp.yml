@@ -10,6 +10,7 @@ jobs:
   analyze:
     name: Analyze (c-cpp)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     permissions:
       security-events: write
@@ -34,6 +35,71 @@ jobs:
     # ------------------------------
     # System dependencies
     # ------------------------------
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git \
+          python3 \
+          clang \
+          ninja-build \
+          lsb-release \
+          pkg-config \
+          build-essential \
+          libglib2.0-dev
+
+    # ------------------------------
+    # depot_tools (idempotent)
+    # ------------------------------
+    - name: Setup depot_tools
+      run: |
+        rm -rf depot_tools
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+    # ------------------------------
+    # gclient
+    # ------------------------------
+    - name: Configure gclient (local checkout)
+      run: |
+        gclient config --unmanaged .
+
+    - name: Sync V8 dependencies
+      run: |
+        gclient sync --no-history
+
+    # ------------------------------
+    # GN configuration (CODEQL OPTIMIZED)
+    # ------------------------------
+    - name: Configure V8 (GN)
+      run: |
+        gn gen out/codeql \
+          --args='
+            is_debug=false
+            use_custom_libcxx=false
+            use_libcxx_modules=false
+            use_sysroot=false
+
+            # 🔥 CUT THE FAT
+            enable_rust=false
+            v8_enable_i18n_support=false
+            v8_use_external_startup_data=false
+            v8_enable_inspector=false
+            v8_enable_webassembly=false
+          '
+
+    # ------------------------------
+    # Build (SMALL TARGET)
+    # ------------------------------
+    - name: Build V8 (Ninja)
+      run: |
+        ninja -C out/codeql -j2 v8_base
+
+    # ------------------------------
+    # Analyze
+    # ------------------------------
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
     - name: Install build dependencies
       run: |
         sudo apt-get update
