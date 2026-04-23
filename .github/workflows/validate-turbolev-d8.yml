@@ -1,0 +1,106 @@
+name: Validate Turbolev generator tests with external d8
+
+on:
+  workflow_dispatch:
+    inputs:
+      d8_url:
+        description: "Direct URL to a d8 binary or zip containing d8"
+        required: true
+        type: string
+      d8_sha256:
+        description: "Optional SHA256 checksum for downloaded file"
+        required: false
+        type: string
+      extra_d8_flags:
+        description: "Extra flags passed to d8 (optional)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip qemu-user qemu-user-binfmt file
+
+      - name: Download d8 payload
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/d8
+          cd /tmp/d8
+          curl -fL --retry 3 --retry-delay 2 "${{ inputs.d8_url }}" -o d8_payload
+
+          if [ -n "${{ inputs.d8_sha256 }}" ]; then
+            echo "${{ inputs.d8_sha256 }}  d8_payload" | sha256sum -c -
+          fi
+
+          if unzip -tq d8_payload >/dev/null 2>&1; then
+            unzip -o d8_payload
+          else
+            chmod +x d8_payload
+          fi
+
+          D8_PATH=$(find /tmp/d8 -type f -name d8 -print -quit)
+          if [ -z "$D8_PATH" ]; then
+            # Fallback: payload itself may be the binary
+            if file d8_payload | grep -Eiq 'ELF .* executable'; then
+              D8_PATH=/tmp/d8/d8_payload
+            else
+              echo "Could not find d8 binary"
+              exit 1
+            fi
+          fi
+
+          chmod +x "$D8_PATH"
+          echo "D8_PATH=$D8_PATH" >> "$GITHUB_ENV"
+
+      - name: Diagnose d8 binary
+        run: |
+          set -euxo pipefail
+          file "$D8_PATH"
+          ldd "$D8_PATH" || true
+          command -v qemu-arm || true
+          command -v qemu-aarch64 || true
+
+      - name: Validate tests with d8
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          LAUNCHER=()
+          if file "$D8_PATH" | grep -q "ARM,"; then
+            LAUNCHER=(qemu-arm -L /usr/arm-linux-gnueabihf)
+          elif file "$D8_PATH" | grep -q "aarch64"; then
+            LAUNCHER=(qemu-aarch64 -L /usr/aarch64-linux-gnu)
+          fi
+
+          COMMON_FLAGS=(--allow-natives-syntax --turbolev --turbofan)
+          if [ -n "${{ inputs.extra_d8_flags }}" ]; then
+            # shellcheck disable=SC2206
+            EXTRA_FLAGS=( ${{ inputs.extra_d8_flags }} )
+          else
+            EXTRA_FLAGS=()
+          fi
+
+          "${LAUNCHER[@]}" "$D8_PATH" "${COMMON_FLAGS[@]}" "${EXTRA_FLAGS[@]}" \
+            test/mjsunit/mjsunit.js test/mjsunit/turbolev/generator-nested-loop-bypass.js
+
+          "${LAUNCHER[@]}" "$D8_PATH" "${COMMON_FLAGS[@]}" "${EXTRA_FLAGS[@]}" \
+            test/mjsunit/mjsunit.js test/mjsunit/turbolev/generator-nested-loop-bypass-resume-modes.js
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d8-info
+          path: |
+            /tmp/d8
