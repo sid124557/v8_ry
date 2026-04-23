@@ -84,7 +84,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(BigIntEqualToNumber, 2, 1)                                        \
   F(BigIntEqualToString, 2, 1)                                        \
   F(BigIntExponentiate, 2, 1)                                         \
-  F(BigIntMaxLengthBits, 0, 1)                                        \
+  F(BigIntMaxBits, 0, 1)                                              \
   F(BigIntToNumber, 1, 1)                                             \
   F(BigIntUnaryOp, 2, 1)                                              \
   F(ToBigInt, 1, 1)                                                   \
@@ -118,6 +118,12 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WeakCollectionSet, 4, 1)                 \
   F(OrderedHashMapGrow, 2, 1)
 
+#ifdef V8_DUMPLING
+#define FOR_EACH_INTRINSIC_COMPILER_DUMPLING(F, I) F(PrintDumpedFrame, 1, 1)
+#else
+#define FOR_EACH_INTRINSIC_COMPILER_DUMPLING(F, I)
+#endif  // V8_DUMPLING
+
 #define FOR_EACH_INTRINSIC_COMPILER_GENERIC(F, I) \
   F(CompileOptimizedOSR, 0, 1)                    \
   F(CompileOptimizedOSRFromMaglev, 1, 1)          \
@@ -133,7 +139,8 @@ constexpr bool CanTriggerGC(T... properties) {
   F(ResolvePossiblyDirectEval, 6, 1)              \
   F(VerifyType, 1, 1)                             \
   F(CheckTurboshaftTypeOf, 2, 1)                  \
-  IF_SPARKPLUG_PLUS(F, MaybePatchBinaryBaselineCode, 4, 1)
+  IF_SPARKPLUG_PLUS(F, PatchBaselineCode, 4, 1)   \
+  IF_SPARKPLUG_PLUS(F, PatchBaselineCodeAndThrow, 4, 1)
 
 // TODO(olivf): Unify the Maglev/TF variants into one runtime function and pass
 // the optimization tier as an argument.
@@ -145,8 +152,9 @@ constexpr bool CanTriggerGC(T... properties) {
   F(StartTurbofanOptimizeJob, 1, 1)      \
   F(MarkLazyDeoptimized, 2, 1)
 
-#define FOR_EACH_INTRINSIC_COMPILER(F, I)   \
-  FOR_EACH_INTRINSIC_COMPILER_GENERIC(F, I) \
+#define FOR_EACH_INTRINSIC_COMPILER(F, I)    \
+  FOR_EACH_INTRINSIC_COMPILER_GENERIC(F, I)  \
+  FOR_EACH_INTRINSIC_COMPILER_DUMPLING(F, I) \
   FOR_EACH_INTRINSIC_TIERING(F, I)
 
 #define FOR_EACH_INTRINSIC_DATE(F, I) F(DateCurrentTime, 0, 1)
@@ -169,6 +177,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(GetGeneratorScopeDetails, 2, 1)             \
   F(HandleDebuggerStatement, 0, 1)              \
   F(IsBreakOnException, 1, 1)                   \
+  F(IterableForEach, 2, 1)                      \
   F(LiveEditPatchScript, 2, 1)                  \
   F(ProfileCreateSnapshotDataBlob, 0, 1)        \
   F(ScheduleBreak, 0, 1)                        \
@@ -256,6 +265,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(ThrowRangeError, -1 /* >= 1 */, 1)             \
   F(ThrowReferenceError, 1, 1)                     \
   F(ThrowAccessedUninitializedVariable, 1, 1)      \
+  F(VarargStackOverflow, -1, 1)                    \
   F(ThrowStackOverflow, 0, 1)                      \
   F(ThrowSymbolAsyncIteratorInvalid, 0, 1)         \
   F(ThrowSymbolIteratorInvalid, 0, 1)              \
@@ -459,7 +469,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(RegExpSplit, 3, 1)                              \
   F(RegExpStringFromFlags, 1, 1)                    \
   F(StringReplaceNonGlobalRegExpWithFunction, 3, 1) \
-  F(StringSplit, 3, 1)                              \
+  F(StringSplit, 4, 1)                              \
   F(RegExpExec, 4, 1)                               \
   F(RegExpExperimentalOneshotExec, 4, 1)
 
@@ -538,6 +548,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(ActiveTierIsSparkplug, 1, 1)                                         \
   F(ActiveTierIsMaglev, 1, 1)                                            \
   F(ActiveTierIsTurbofan, 1, 1)                                          \
+  F(AllocateHeapNumberWithValue, 1, 1)                                   \
   F(ArrayBufferDetachForceWasm, 1, 1)                                    \
   F(ArrayIteratorProtector, 0, 1)                                        \
   F(ArraySpeciesProtector, 0, 1)                                         \
@@ -576,6 +587,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(MajorGCForCompilerTesting, 0, 1)                                     \
   F(GetAbstractModuleSource, 0, 1)                                       \
   F(GetBytecode, 1, 1)                                                   \
+  F(ExhaustInterruptBudget, 1, 1)                                        \
   F(GetCallable, 1, 1)                                                   \
   F(GetFeedback, 1, 1)                                                   \
   F(GetFunctionForCurrentFrame, 0, 1)                                    \
@@ -691,19 +703,22 @@ constexpr bool CanTriggerGC(T... properties) {
   F(TypedArraySortFast, 1, 1)
 
 #if V8_ENABLE_DRUMBRAKE
-#define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I) F(WasmRunInterpreter, 3, 1)
+#define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I) F(WasmRunInterpreter, 4, 1)
 #else
 #define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)
 #endif  // V8_ENABLE_DRUMBRAKE
 
 #define FOR_EACH_INTRINSIC_WASM(F, I)                            \
   FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)                        \
-  F(ThrowWasmSuspendError, 0, 1)                                 \
+  F(ThrowWasmJSPISuspendError, 0, 1)                             \
+  F(ThrowWasmFXSuspendError, 0, 1)                               \
   F(ThrowWasmError, 1, 1)                                        \
   F(TrapHandlerThrowWasmError, 0, 1)                             \
   F(ThrowWasmStackOverflow, 0, 1)                                \
   F(WasmI32AtomicWait, 4, 1)                                     \
   F(WasmI64AtomicWait, 5, 1)                                     \
+  F(WasmManagedObjectWait, 4, 1)                                 \
+  F(WasmAllocateWaitQueue, 2, 1)                                 \
   F(WasmMemoryGrow, 2, 1)                                        \
   F(WasmStackGuard, 1, 1)                                        \
   F(WasmStackGuardLoop, 0, 1)                                    \
@@ -723,8 +738,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmTableGrow, 3, 1)                                         \
   F(WasmTableFill, 5, 1)                                         \
   F(WasmJSToWasmObject, 2, 1)                                    \
-  F(WasmGenericJSToWasmObject, 2, 1)                             \
-  F(WasmGenericWasmToJSObject, 1, 1)                             \
+  F(WasmWasmToJSObject, 1, 1)                                    \
   F(WasmCompileLazy, 2, 1)                                       \
   F(WasmAllocateFeedbackVector, 3, 1)                            \
   F(WasmLiftoffDeoptFinish, 1, 1)                                \
@@ -739,14 +753,15 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmArrayInitSegment, 6, 1)                                  \
   F(WasmAllocateSuspender, 0, 1)                                 \
   F(WasmAllocateContinuation, 2, 1)                              \
-  F(WasmAllocateEmptyContinuation, 0, 1)                         \
+  F(WasmAllocateBoundContinuation, 2, 1)                         \
   F(ClearWasmSuspenderResumeField, 1, 1)                         \
   F(WasmCastToSpecialPrimitiveArray, 2, 1)                       \
+  F(WasmStringAdd_CheckNone_Shared, 2, 1)                        \
   F(WasmStringNewSegmentWtf8, 5, 1)                              \
   F(WasmStringNewWtf8, 5, 1)                                     \
-  F(WasmStringNewWtf8Array, 4, 1)                                \
+  F(WasmStringNewWtf8Array, 5, 1)                                \
   F(WasmStringNewWtf16, 4, 1)                                    \
-  F(WasmStringNewWtf16Array, 3, 1)                               \
+  F(WasmStringNewWtf16Array, 4, 1)                               \
   F(WasmStringConst, 2, 1)                                       \
   F(WasmStringMeasureUtf8, 1, 1)                                 \
   F(WasmStringMeasureWtf8, 1, 1)                                 \
@@ -757,9 +772,10 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmStringAsWtf8, 1, 1)                                      \
   F(WasmStringViewWtf8Encode, 7, 1)                              \
   F(WasmStringViewWtf8Slice, 3, 1)                               \
-  F(WasmStringFromCodePoint, 1, 1)                               \
+  F(WasmStringFromCodePoint, 2, 1)                               \
   F(WasmStringHash, 1, 1, RuntimeCallProperty::kCannotTriggerGC) \
   F(WasmSubstring, 3, 1)                                         \
+  F(WasmSubstringShared, 3, 1)                                   \
   F(WasmConfigureAllPrototypes, 4, 1)                            \
   F(WasmConfigureAllPrototypesOpt, 3, 1)                         \
   F(DebugCollectWasmCoverage, 0, 1)                              \
@@ -777,7 +793,6 @@ constexpr bool CanTriggerGC(T... properties) {
   F(GetWasmExceptionTagId, 2, 1)                                \
   F(GetWasmExceptionValues, 1, 1)                               \
   F(GetWasmRecoveredTrapCount, 0, 1)                            \
-  F(HasUnoptimizedJSToJSWrapper, 1, 1)                          \
   F(HasUnoptimizedWasmToJSWrapper, 1, 1)                        \
   F(IsAsmWasmCode, 1, 1)                                        \
   F(IsLiftoffFunction, 1, 1)                                    \
@@ -837,10 +852,11 @@ constexpr bool CanTriggerGC(T... properties) {
   F(LoadIC_Miss, 4, 1)                       \
   F(LoadIC_Miss_FromBaseline, 4, 1)          \
   F(PatchLoadICUninitializedBaseline, 4, 1)  \
+  F(GetStringLengthAndUpdateFeedback, 3, 1)  \
   F(LoadNoFeedbackIC_Miss, 4, 1)             \
   F(LoadWithReceiverIC_Miss, 5, 1)           \
   F(LoadWithReceiverNoFeedbackIC_Miss, 3, 1) \
-  F(LoadPropertyWithInterceptor, 6, 1)       \
+  F(LoadPropertyPastInterceptor, 6, 1)       \
   F(StoreCallbackProperty, 5, 1)             \
   F(StoreGlobalIC_Miss, 4, 1)                \
   F(StoreGlobalICNoFeedback_Miss, 2, 1)      \
@@ -848,7 +864,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(StoreIC_Miss, 5, 1)                      \
   F(DefineNamedOwnIC_Miss, 5, 1)             \
   F(StoreInArrayLiteralIC_Slow, 5, 1)        \
-  F(StorePropertyWithInterceptor, 4, 1)      \
+  F(StorePropertyPastInterceptor, 4, 1)      \
   F(CloneObjectIC_Slow, 2, 1)                \
   F(CloneObjectIC_Miss, 4, 1)                \
   F(KeyedHasIC_Miss, 4, 1)                   \
@@ -1141,6 +1157,8 @@ enum class DebugPrintValueType : uint16_t {
   kFloat64,
   kTagged,
 };
+
+void PrintIndentation(int stack_size);
 
 }  // namespace internal
 }  // namespace v8

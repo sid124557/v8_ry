@@ -8,6 +8,7 @@
 #include <atomic>
 
 #include "src/api/api-inl.h"
+#include "src/objects/managed.h"
 #include "src/objects/objects-inl.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/utils/version.h"
@@ -353,11 +354,10 @@ TEST(TestInterruptLoop) {
                                         base::VectorOf(buffer))
             .ToHandleChecked();
 
-    DirectHandle<JSArrayBuffer> memory(
-        instance->trusted_data(isolate)->memory_object(0)->array_buffer(),
-        isolate);
+    Managed<BackingStore>::Ptr backing_store =
+        instance->trusted_data(isolate)->memory_object(0)->backing_store();
     std::atomic<int32_t>* memory_array =
-        reinterpret_cast<std::atomic<int32_t>*>(memory->backing_store());
+        reinterpret_cast<std::atomic<int32_t>*>(backing_store->buffer_start());
 
     InterruptThread thread(isolate, memory_array);
     CHECK(thread.Start());

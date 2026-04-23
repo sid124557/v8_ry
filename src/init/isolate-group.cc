@@ -26,10 +26,6 @@
 #include <partition_alloc/partition_alloc.h>
 #endif
 
-#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
-#include "src/sandbox/external-strings-cage.h"
-#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
-
 namespace v8 {
 namespace internal {
 
@@ -135,8 +131,6 @@ IsolateGroup::~IsolateGroup() {
     memory_pool_->TearDown();
   }
 
-  js_dispatch_table_.TearDown();
-
 #ifdef V8_ENABLE_SANDBOX
   code_pointer_table_.TearDown();
   trusted_range_.Free();
@@ -207,17 +201,14 @@ void IsolateGroup::Initialize(bool process_wide, Sandbox* sandbox) {
       std::make_unique<OptimizingCompileTaskExecutor>();
 
   if (v8_flags.memory_pool) {
-    memory_pool_ = std::make_unique<MemoryPool>();
+    memory_pool_ = std::make_unique<MemoryPool>(MemoryPool::Config{
+        .single_threaded = v8_flags.single_threaded,
+        .share_memory_on_teardown =
+            v8_flags.memory_pool_share_memory_on_teardown,
+        .trace_gc_nvp = v8_flags.trace_gc_nvp,
+        .max_large_page_pool_size = v8_flags.max_large_page_pool_size,
+        .timeout_in_sec = v8_flags.memory_pool_timeout});
   }
-
-  js_dispatch_table()->Initialize();
-
-#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
-  if (!external_strings_cage_.Initialize()) {
-    V8::FatalProcessOutOfMemory(
-        nullptr, "Failed to reserve virtual memory for ExternalStringsCage");
-  }
-#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 }
 #elif defined(V8_COMPRESS_POINTERS)
 void IsolateGroup::Initialize(bool process_wide) {
@@ -250,8 +241,12 @@ void IsolateGroup::Initialize(bool process_wide) {
   trusted_pointer_compression_cage_ = &reservation_;
   optimizing_compile_task_executor_ =
       std::make_unique<OptimizingCompileTaskExecutor>();
-  memory_pool_ = std::make_unique<MemoryPool>();
-  js_dispatch_table()->Initialize();
+  memory_pool_ = std::make_unique<MemoryPool>(MemoryPool::Config{
+      .single_threaded = v8_flags.single_threaded,
+      .share_memory_on_teardown = v8_flags.memory_pool_share_memory_on_teardown,
+      .trace_gc_nvp = v8_flags.trace_gc_nvp,
+      .max_large_page_pool_size = v8_flags.max_large_page_pool_size,
+      .timeout_in_sec = v8_flags.memory_pool_timeout});
 }
 #else   // !V8_COMPRESS_POINTERS
 void IsolateGroup::Initialize(bool process_wide) {
@@ -259,8 +254,12 @@ void IsolateGroup::Initialize(bool process_wide) {
   page_allocator_ = GetPlatformPageAllocator();
   optimizing_compile_task_executor_ =
       std::make_unique<OptimizingCompileTaskExecutor>();
-  memory_pool_ = std::make_unique<MemoryPool>();
-  js_dispatch_table()->Initialize();
+  memory_pool_ = std::make_unique<MemoryPool>(MemoryPool::Config{
+      .single_threaded = v8_flags.single_threaded,
+      .share_memory_on_teardown = v8_flags.memory_pool_share_memory_on_teardown,
+      .trace_gc_nvp = v8_flags.trace_gc_nvp,
+      .max_large_page_pool_size = v8_flags.max_large_page_pool_size,
+      .timeout_in_sec = v8_flags.memory_pool_timeout});
 }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -547,6 +546,35 @@ void* SandboxedArrayBufferAllocator::AllocateUninitialized(size_t length) {
   return Allocate(length);
 }
 
+void* SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash(
+    size_t length) {
+  base::MutexGuard guard(&mutex_);
+
+  length = RoundUp(length, kAllocationGranularity);
+  Address region = region_alloc_->AllocateRegion(length);
+  if (region == base::RegionAllocator::kAllocationFailure) {
+    V8::FatalProcessOutOfMemory(
+        nullptr,
+        "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+  }
+
+  // Check if the memory is inside the accessible region. If not, grow it.
+  Address end = region + length;
+  if (end > end_of_accessible_region_) {
+    Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
+    size_t size = new_end_of_accessible_region - end_of_accessible_region_;
+    if (!sandbox_->address_space()->SetPagePermissions(
+            end_of_accessible_region_, size, PagePermissions::kReadWrite)) {
+      V8::FatalProcessOutOfMemory(
+          nullptr,
+          "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+    }
+    end_of_accessible_region_ = new_end_of_accessible_region;
+  }
+
+  return reinterpret_cast<void*>(region);
+}
+
 void SandboxedArrayBufferAllocator::Free(void* data) {
   base::MutexGuard guard(&mutex_);
   region_alloc_->FreeRegion(reinterpret_cast<Address>(data));
@@ -614,6 +642,10 @@ class PABackedSandboxedArrayBufferAllocator::Impl final {
     return AllocateInternal<flags>(length);
   }
 
+  void* AllocateUninitializedOrCrash(size_t length) {
+    return AllocateInternal<partition_alloc::AllocFlags::kNone>(length);
+  }
+
   void Free(void* data) {
     partition_.root()->Free<partition_alloc::FreeFlags::kNoMemoryToolOverride>(
         data);
@@ -658,6 +690,12 @@ void* PABackedSandboxedArrayBufferAllocator::AllocateUninitialized(
     size_t length) {
   DCHECK(impl_);
   return impl_->AllocateUninitialized(length);
+}
+
+void* PABackedSandboxedArrayBufferAllocator::AllocateUninitializedOrCrash(
+    size_t length) {
+  DCHECK(impl_);
+  return impl_->AllocateUninitializedOrCrash(length);
 }
 
 void PABackedSandboxedArrayBufferAllocator::Free(void* data) {

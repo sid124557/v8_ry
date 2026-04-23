@@ -83,8 +83,9 @@ class LoadStoreSimplificationReducer : public Next,
 
   OpIndex REDUCE(Store)(OpIndex base, OptionalOpIndex index, OpIndex value,
                         StoreOp::Kind kind, MemoryRepresentation stored_rep,
-                        WriteBarrierKind write_barrier, int32_t offset,
-                        uint8_t element_size_log2,
+                        WriteBarrierKind write_barrier,
+                        std::optional<AtomicMemoryOrder> memory_order,
+                        int32_t offset, uint8_t element_size_log2,
                         bool maybe_initializing_or_transitioning,
                         IndirectPointerTag maybe_indirect_pointer_tag) {
     SimplifyLoadStore(base, index, kind, offset, element_size_log2,
@@ -104,10 +105,10 @@ class LoadStoreSimplificationReducer : public Next,
         return OpIndex::Invalid();
       }
     }
-    return Next::ReduceStore(base, index, value, kind, stored_rep,
-                             write_barrier, offset, element_size_log2,
-                             maybe_initializing_or_transitioning,
-                             maybe_indirect_pointer_tag);
+    return Next::ReduceStore(
+        base, index, value, kind, stored_rep, write_barrier, memory_order,
+        offset, element_size_log2, maybe_initializing_or_transitioning,
+        maybe_indirect_pointer_tag);
   }
 
   OpIndex REDUCE(AtomicWord32Pair)(V<WordPtr> base, OptionalV<WordPtr> index,
@@ -135,7 +136,7 @@ class LoadStoreSimplificationReducer : public Next,
 #if V8_ENABLE_SANDBOX
   V<Object> REDUCE(LoadTrustedPointer)(V<WordPtr> table, V<Word32> handle,
                                        bool is_immutable,
-                                       IndirectPointerTag tag) {
+                                       IndirectPointerTagRange tag_range) {
     // We need to disable GVN in this function so that the `Load` isn't GVNed
     // (because it's actually load a pointer but isn't marked as such (because
     // the pointer it loads needs to be decoded before it can be used, so the GC
@@ -159,9 +160,32 @@ class LoadStoreSimplificationReducer : public Next,
     V<WordPtr> decoded_ptr =
         __ Load(table, table_offset, kind, MemoryRepresentation::UintPtr());
 
-    // Untag the pointer and remove the marking bit in one operation.
-    decoded_ptr =
-        __ Word64BitwiseAnd(decoded_ptr, ~(tag | kTrustedPointerTableMarkBit));
+    if (IsFastIndirectPointerTagRange(tag_range)) {
+      uint64_t mask = ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+      decoded_ptr = __ WordPtrBitwiseAnd(decoded_ptr, mask);
+    } else {
+      V<Word32> tag = __ TruncateWordPtrToWord32(__ WordPtrShiftRightLogical(
+          decoded_ptr, kTrustedPointerTableTagShift));
+
+      V<Word32> is_valid;
+      if (tag_range.Size() == 1) {
+        is_valid = __ Word32Equal(tag, tag_range.first);
+      } else {
+        V<Word32> diff = __ Word32Sub(tag, tag_range.first);
+        is_valid =
+            __ Uint32LessThanOrEqual(diff, tag_range.last - tag_range.first);
+      }
+
+      // Return an invalid pointer (nullptr) on tag mismatch.
+      decoded_ptr =
+          __ Select(is_valid, decoded_ptr, __ IntPtrConstant(0),
+                    RegisterRepresentation::WordPtr(), BranchHint::kTrue,
+                    SelectOp::Implementation::kForceCMove);
+
+      decoded_ptr =
+          __ WordPtrBitwiseAnd(decoded_ptr, kTrustedPointerTablePayloadMask);
+    }
+
     // Bitcast to tagged to this gets scanned by the GC properly.
     return __ BitcastWordPtrToTagged(decoded_ptr);
   }

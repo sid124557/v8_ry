@@ -722,11 +722,9 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     // These builtins with JS calling convention are not JS language builtins
     // but are allowed to be installed into JSFunctions.
     case Builtin::kJSToWasmWrapper:
-    case Builtin::kJSToJSWrapper:
-    case Builtin::kJSToJSWrapperInvalidSig:
     case Builtin::kWasmPromising:
 #if V8_ENABLE_DRUMBRAKE
-    case Builtin::kGenericJSToWasmInterpreterWrapper:
+    case Builtin::kJSToWasmInterpreterWrapper:
 #endif
     case Builtin::kWasmStressSwitch:
       return JSBuiltinStateFlag::kJSTrampoline;
@@ -740,12 +738,19 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kWebAssemblyStringCast:
     case Builtin::kWebAssemblyStringTest:
     case Builtin::kWebAssemblyStringFromWtf16Array:
+    case Builtin::kWebAssemblyStringFromWtf16ArrayShared:
     case Builtin::kWebAssemblyStringFromUtf8Array:
+    case Builtin::kWebAssemblyStringFromUtf8ArrayShared:
     case Builtin::kWebAssemblyStringIntoUtf8Array:
+    case Builtin::kWebAssemblyStringIntoUtf8ArrayShared:
     case Builtin::kWebAssemblyStringToUtf8Array:
+    case Builtin::kWebAssemblyStringToUtf8ArrayShared:
     case Builtin::kWebAssemblyStringToWtf16Array:
+    case Builtin::kWebAssemblyStringToWtf16ArrayShared:
     case Builtin::kWebAssemblyStringFromCharCode:
+    case Builtin::kWebAssemblyStringFromCharCodeShared:
     case Builtin::kWebAssemblyStringFromCodePoint:
+    case Builtin::kWebAssemblyStringFromCodePointShared:
     case Builtin::kWebAssemblyStringCodePointAt:
     case Builtin::kWebAssemblyStringCharCodeAt:
     case Builtin::kWebAssemblyStringLength:
@@ -781,12 +786,6 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
       //
       // Various feature-dependent builtins.
       //
-
-#if V8_ENABLE_WEBASSEMBLY
-    case Builtin::kWebAssemblyFunctionPrototypeBind:
-      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(
-          wasm::WasmEnabledFeatures::FromFlags().has_type_reflection());
-#endif  // V8_ENABLE_WEBASSEMBLY
 
     // --enable-experimental-regexp-engine
     case Builtin::kRegExpPrototypeLinearGetter:
@@ -882,6 +881,10 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kIteratorConcat:
       RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_iterator_sequencing);
 
+    // --js-joint-iteration:
+    case Builtin::kIteratorZip:
+      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_joint_iteration);
+
     // --js-upsert
     case Builtin::kMapPrototypeGetOrInsert:
     case Builtin::kMapPrototypeGetOrInsertComputed:
@@ -894,6 +897,18 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kArrayBufferPrototypeTransferToImmutable:
     case Builtin::kArrayBufferPrototypeSliceToImmutable:
       RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_immutable_arraybuffer);
+
+    // --js-sum-precise
+    case Builtin::kMathSumPrecise:
+      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_sum_precise);
+
+    // --enable-queue-microtask
+    case Builtin::kGlobalQueueMicrotask:
+      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.enable_queue_microtask);
+
+    // --js-iterator-join
+    case Builtin::kIteratorPrototypeJoin:
+      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_iterator_join);
 
 #ifdef V8_INTL_SUPPORT
     // --js-intl-locale-variants

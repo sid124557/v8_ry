@@ -31,13 +31,23 @@ class JSArgumentsObject
 
 // JSSloppyArgumentsObject is just a JSArgumentsObject with specific initial
 // map. This initial map adds in-object properties for "length" and "callee".
-class JSSloppyArgumentsObject
-    : public TorqueGeneratedJSSloppyArgumentsObject<JSSloppyArgumentsObject,
-                                                    JSArgumentsObject> {
+// Shape-style: no own C++ storage; fields live in the parent
+// JSArgumentsObject's in-object property slots at fixed offsets past
+// JSArgumentsObject::kHeaderSize.
+class JSSloppyArgumentsObject : public JSArgumentsObject {
  public:
-  // Indices of in-object properties.
-  static const int kLengthIndex = 0;
-  static const int kCalleeIndex = kLengthIndex + 1;
+  // Slot indices of the in-object properties, relative to the parent's
+  // kHeaderSize.
+  static constexpr int kLengthSlotIndex = 0;
+  static constexpr int kCalleeSlotIndex = 1;
+  static constexpr int kInObjectPropertyCount = 2;
+
+  static constexpr int kLengthOffset =
+      JSArgumentsObject::kHeaderSize + kLengthSlotIndex * kTaggedSize;
+  static constexpr int kCalleeOffset =
+      JSArgumentsObject::kHeaderSize + kCalleeSlotIndex * kTaggedSize;
+  static constexpr int kSize =
+      JSArgumentsObject::kHeaderSize + kInObjectPropertyCount * kTaggedSize;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSSloppyArgumentsObject);
@@ -45,13 +55,15 @@ class JSSloppyArgumentsObject
 
 // JSStrictArgumentsObject is just a JSArgumentsObject with specific initial
 // map. This initial map adds an in-object property for "length".
-class JSStrictArgumentsObject
-    : public TorqueGeneratedJSStrictArgumentsObject<JSStrictArgumentsObject,
-                                                    JSArgumentsObject> {
+class JSStrictArgumentsObject : public JSArgumentsObject {
  public:
-  // Indices of in-object properties.
-  static const int kLengthIndex = 0;
-  static_assert(kLengthIndex == JSSloppyArgumentsObject::kLengthIndex);
+  static constexpr int kLengthSlotIndex = 0;
+  static constexpr int kInObjectPropertyCount = 1;
+
+  static constexpr int kLengthOffset =
+      JSArgumentsObject::kHeaderSize + kLengthSlotIndex * kTaggedSize;
+  static constexpr int kSize =
+      JSArgumentsObject::kHeaderSize + kInObjectPropertyCount * kTaggedSize;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSStrictArgumentsObject);
@@ -65,14 +77,19 @@ class JSStrictArgumentsObject
 // - the parameter map contains no fast alias mapping (i.e. the hole)
 // - this struct (in the slow backing store) contains an index into the context
 // - all attributes are available as part if the property details
-class AliasedArgumentsEntry
-    : public TorqueGeneratedAliasedArgumentsEntry<AliasedArgumentsEntry,
-                                                  Struct> {
+V8_OBJECT class AliasedArgumentsEntry : public Struct {
  public:
+  inline int aliased_context_slot() const;
+  inline void set_aliased_context_slot(int value);
+
   using BodyDescriptor = StructBodyDescriptor;
 
-  TQ_OBJECT_CONSTRUCTORS(AliasedArgumentsEntry)
-};
+  DECL_PRINTER(AliasedArgumentsEntry)
+  DECL_VERIFIER(AliasedArgumentsEntry)
+
+ public:
+  TaggedMember<Smi> aliased_context_slot_;
+} V8_OBJECT_END;
 
 class SloppyArgumentsElementsShape final : public AllStatic {
  public:

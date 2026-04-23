@@ -173,23 +173,14 @@ class InterceptorLoggingTest : public TestWithNativeContext {
     return v8::Intercepted::kNo;
   }
 
-  // Allow usages of v8::PropertyCallbackInfo<T>::This() for now.
-  // TODO(https://crbug.com/455600234): remove.
-  START_ALLOW_USE_DEPRECATED()
-
   template <class T>
   static void LogCallback(const v8::PropertyCallbackInfo<T>& info,
                           const char* callback_name) {
-    CHECK_EQ(info.This(), info.HolderV2());
     InterceptorLoggingTest* test = reinterpret_cast<InterceptorLoggingTest*>(
-        info.HolderV2()->GetAlignedPointerFromInternalField(
-            kTestIndex, kTestInterceptorTag));
+        info.Holder()->GetAlignedPointerFromInternalField(kTestIndex,
+                                                          kTestInterceptorTag));
     test->Log(callback_name);
   }
-
-  // Allow usages of v8::PropertyCallbackInfo<T>::This() for now.
-  // TODO(https://crbug.com/455600234): remove.
-  END_ALLOW_USE_DEPRECATED()
 
   void Log(const char* callback_name) {
     if (log_is_empty_) {
@@ -274,8 +265,8 @@ TEST_F(InterceptorLoggingTest, DispatchTest) {
 
   EXPECT_EQ(Run("Object.prototype.hasOwnProperty.call(obj, 'a')"),
             "named query");
-  // TODO(cbruni): Fix once hasOnwProperty is fixed (https://crbug.com/872628)
-  EXPECT_EQ(Run("Object.prototype.hasOwnProperty.call(obj, '42')"), "");
+  EXPECT_EQ(Run("Object.prototype.hasOwnProperty.call(obj, '42')"),
+            "indexed query");
 }
 }  // namespace
 }  // namespace internal

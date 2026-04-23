@@ -155,6 +155,24 @@ void WriteBarrier::ForValue(HeapObjectLayout* host, TaggedMemberBase* slot,
                                value_object, mode);
 }
 
+// static
+template <typename T>
+void WriteBarrier::ForValue(HeapObjectLayout* host, MaybeObjectSlot slot,
+                            Tagged<T> value, WriteBarrierMode mode) {
+  if (IsSkipWriteBarrierMode(mode)) {
+#if V8_VERIFY_WRITE_BARRIERS
+    VerifySkipWriteBarrier(host, value, mode);
+#endif  // V8_VERIFY_WRITE_BARRIERS
+    return;
+  }
+  Tagged<HeapObject> value_object;
+  if (!value.GetHeapObject(&value_object)) {
+    return;
+  }
+  CombinedWriteBarrierInternal(Tagged(host), HeapObjectSlot(slot), value_object,
+                               mode);
+}
+
 #if V8_VERIFY_WRITE_BARRIERS
 // static
 template <typename T>
@@ -255,17 +273,18 @@ void WriteBarrier::ForIndirectPointer(Tagged<HeapObject> host,
 }
 
 // static
-template <typename T, IndirectPointerTag kTag>
+template <typename T, IndirectPointerTagRange kTagRange>
 void WriteBarrier::ForIndirectPointer(HeapObjectLayout* host,
-                                      TrustedPointerMember<T, kTag>* slot,
+                                      TrustedPointerMember<T, kTagRange>* slot,
                                       Tagged<T> value, WriteBarrierMode mode) {
   // Indirect pointers are only used when the sandbox is enabled.
 #ifdef V8_ENABLE_SANDBOX
   // TODO(leszeks): Avoid the cast to Address here, pass a pointer to the actual
   // handle field.
-  ForIndirectPointer(Tagged(host),
-                     IndirectPointerSlot(reinterpret_cast<Address>(slot), kTag),
-                     value, mode);
+  ForIndirectPointer(
+      Tagged(host),
+      IndirectPointerSlot(reinterpret_cast<Address>(slot), kTagRange), value,
+      mode);
 #else
   UNREACHABLE();
 #endif
@@ -284,6 +303,13 @@ void WriteBarrier::ForJSDispatchHandle(Tagged<HeapObject> host,
     return;
   }
   Marking(host, handle);
+}
+
+// static
+void WriteBarrier::ForJSDispatchHandle(HeapObjectLayout* host,
+                                       JSDispatchHandle handle,
+                                       WriteBarrierMode mode) {
+  ForJSDispatchHandle(Tagged(host), handle, mode);
 }
 
 // static

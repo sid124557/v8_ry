@@ -20,6 +20,7 @@ specific_include_rules = {
     "+src/compiler/turboshaft/define-assembler-macros.inc",
     "+src/compiler/turboshaft/assembler.h",
     "+src/compiler/turboshaft/dataview-lowering-reducer.h",
+    "+src/compiler/turboshaft/fast-api-call-lowering-reducer.h",
     "+src/compiler/turboshaft/select-lowering-reducer.h",
     "+src/compiler/turboshaft/variable-reducer.h",
   ],
@@ -48,6 +49,9 @@ specific_include_rules = {
     # The LiftoffAssembler needs to know CallDescriptors.
     "+src/compiler/linkage.h",
   ],
+  "liftoff-assembler\.h": [
+    "+src/compiler/write-barrier-kind.h",
+  ],
   "liftoff-assembler-(x64|arm64|loong64|mips64|riscv)-inl\.h": [
     # The LiftoffAssembler needs to know CallDescriptors.
     "+src/compiler/linkage.h",
@@ -56,6 +60,10 @@ specific_include_rules = {
     "-src/compiler",
     "+src/compiler/access-builder.h",
     "+src/compiler/wasm-compiler.h",
+  ],
+  "liftoff-compiler\.h": [
+    "-src/compiler",
+    "+src/compiler/write-barrier-kind.h",
   ],
   "module-instantiate\.cc": [
     "+src/compiler/fast-api-calls.h",

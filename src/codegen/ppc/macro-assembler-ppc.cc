@@ -110,13 +110,16 @@ int MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register scratch1,
 }
 
 void MacroAssembler::GetLabelAddress(Register dest, Label* target) {
+  BlockTrampolinePoolScope block_trampoline_pool(this);
+
   // This should be just a
   //    add(dest, pc, branch_offset(target));
   // but current implementation of Assembler::bind_to()/target_at_put() add
   // (InstructionStream::kHeaderSize - kHeapObjectTag) to a position of a label
   // in a "linked" state and thus making it usable only for mov_label_offset().
   // TODO(ishell): fix branch_offset() and re-implement
-  // RegExpMacroAssemblerARM::PushBacktrack() without mov_label_offset().
+  // regexp::RegExpMacroAssemblerARM::PushBacktrack() without
+  // mov_label_offset().
   mov_label_offset(dest, target);
   // mov_label_offset computes offset of the |target| relative to the "current
   // InstructionStream object pointer" which is essentially pc_offset() of the
@@ -127,10 +130,6 @@ void MacroAssembler::GetLabelAddress(Register dest, Label* target) {
       pc_offset() + kPcLoadDelta +
       (InstructionStream::kHeaderSize - kHeapObjectTag);
   LoadPC(r0);
-  // LoadPC emits 2 instructions, pc_offset() is pointing to it's first
-  // instruction but real pc will be pointing to it's second instruction, make
-  // an adjustment so they both point to the same offset.
-  current_instr_code_object_relative_offset -= kInstrSize;
   AddS64(dest, r0, dest);
   SubS64(dest, dest, Operand(current_instr_code_object_relative_offset));
 }
@@ -1182,16 +1181,12 @@ void MacroAssembler::LoadConstantPoolPointerRegisterFromCodeTargetAddress(
 }
 
 void MacroAssembler::LoadPC(Register dst) {
-  b(4, SetLK);
-  mflr(dst);
-  // dst points to address of mflr
+  addpcis(dst, Operand(0));
 }
 
 void MacroAssembler::ComputeCodeStartAddress(Register dst) {
-  mflr(r0);
   LoadPC(dst);
-  subi(dst, dst, Operand(pc_offset() - kInstrSize));
-  mtlr(r0);
+  subi(dst, dst, Operand(pc_offset()));
 }
 
 void MacroAssembler::LoadConstantPoolPointerRegister() {
@@ -1200,7 +1195,7 @@ void MacroAssembler::LoadConstantPoolPointerRegister() {
   static_assert(InstructionStream::kOnHeapBodyIsContiguous);
 
   LoadPC(kConstantPoolRegister);
-  int32_t delta = -pc_offset() + 4;
+  int32_t delta = -pc_offset();
   add_label_offset(kConstantPoolRegister, kConstantPoolRegister,
                    ConstantPoolPosition(), delta);
 }
@@ -1695,93 +1690,6 @@ void MacroAssembler::CompareRoot(Register obj, RootIndex index) {
   CompareTaggedRoot(obj, index);
 }
 
-void MacroAssembler::AddAndCheckForOverflow(Register dst, Register left,
-                                            Register right,
-                                            Register overflow_dst,
-                                            Register scratch) {
-  DCHECK(dst != overflow_dst);
-  DCHECK(dst != scratch);
-  DCHECK(overflow_dst != scratch);
-  DCHECK(overflow_dst != left);
-  DCHECK(overflow_dst != right);
-
-  bool left_is_right = left == right;
-  RCBit xorRC = left_is_right ? SetRC : LeaveRC;
-
-  // C = A+B; C overflows if A/B have same sign and C has diff sign than A
-  if (dst == left) {
-    mr(scratch, left);                        // Preserve left.
-    add(dst, left, right);                    // Left is overwritten.
-    xor_(overflow_dst, dst, scratch, xorRC);  // Original left.
-    if (!left_is_right) xor_(scratch, dst, right);
-  } else if (dst == right) {
-    mr(scratch, right);     // Preserve right.
-    add(dst, left, right);  // Right is overwritten.
-    xor_(overflow_dst, dst, left, xorRC);
-    if (!left_is_right) xor_(scratch, dst, scratch);  // Original right.
-  } else {
-    add(dst, left, right);
-    xor_(overflow_dst, dst, left, xorRC);
-    if (!left_is_right) xor_(scratch, dst, right);
-  }
-  if (!left_is_right) and_(overflow_dst, scratch, overflow_dst, SetRC);
-}
-
-void MacroAssembler::AddAndCheckForOverflow(Register dst, Register left,
-                                            intptr_t right,
-                                            Register overflow_dst,
-                                            Register scratch) {
-  Register original_left = left;
-  DCHECK(dst != overflow_dst);
-  DCHECK(dst != scratch);
-  DCHECK(overflow_dst != scratch);
-  DCHECK(overflow_dst != left);
-
-  // C = A+B; C overflows if A/B have same sign and C has diff sign than A
-  if (dst == left) {
-    // Preserve left.
-    original_left = overflow_dst;
-    mr(original_left, left);
-  }
-  AddS64(dst, left, Operand(right), scratch);
-  xor_(overflow_dst, dst, original_left);
-  if (right >= 0) {
-    and_(overflow_dst, overflow_dst, dst, SetRC);
-  } else {
-    andc(overflow_dst, overflow_dst, dst, SetRC);
-  }
-}
-
-void MacroAssembler::SubAndCheckForOverflow(Register dst, Register left,
-                                            Register right,
-                                            Register overflow_dst,
-                                            Register scratch) {
-  DCHECK(dst != overflow_dst);
-  DCHECK(dst != scratch);
-  DCHECK(overflow_dst != scratch);
-  DCHECK(overflow_dst != left);
-  DCHECK(overflow_dst != right);
-
-  // C = A-B; C overflows if A/B have diff signs and C has diff sign than A
-  if (dst == left) {
-    mr(scratch, left);      // Preserve left.
-    sub(dst, left, right);  // Left is overwritten.
-    xor_(overflow_dst, dst, scratch);
-    xor_(scratch, scratch, right);
-    and_(overflow_dst, overflow_dst, scratch, SetRC);
-  } else if (dst == right) {
-    mr(scratch, right);     // Preserve right.
-    sub(dst, left, right);  // Right is overwritten.
-    xor_(overflow_dst, dst, left);
-    xor_(scratch, left, scratch);
-    and_(overflow_dst, overflow_dst, scratch, SetRC);
-  } else {
-    sub(dst, left, right);
-    xor_(overflow_dst, dst, left);
-    xor_(scratch, left, right);
-    and_(overflow_dst, scratch, overflow_dst, SetRC);
-  }
-}
 
 void MacroAssembler::MinF64(DoubleRegister dst, DoubleRegister lhs,
                             DoubleRegister rhs, DoubleRegister scratch) {
@@ -2042,14 +1950,18 @@ void MacroAssembler::LoadMap(Register destination, Register object) {
                   r0);
 }
 
-void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
-                                        Register scratch, Label* fbv_undef) {
-  Label done;
-
-  // Load the feedback vector from the closure.
+void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
   LoadTaggedField(
       dst, FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
-  LoadTaggedField(dst, FieldMemOperand(dst, FeedbackCell::kValueOffset), r0);
+}
+
+void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
+                                                Register feedback_cell,
+                                                Register scratch,
+                                                Label* fbv_undef) {
+  Label done;
+  LoadTaggedField(
+      dst, FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)), r0);
 
   // Check if feedback vector is valid.
   LoadTaggedField(scratch, FieldMemOperand(dst, HeapObject::kMapOffset), r0);
@@ -2062,6 +1974,12 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
   b(fbv_undef);
 
   bind(&done);
+}
+
+void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
+                                        Register scratch, Label* fbv_undef) {
+  LoadFeedbackCell(dst, closure);
+  LoadFeedbackVectorFromCell(dst, dst, scratch, fbv_undef);
 }
 
 void MacroAssembler::LoadInterpreterDataBytecodeArray(
@@ -2410,9 +2328,6 @@ int MacroAssembler::CallCFunction(Register function, int num_reg_arguments,
     int offset_since_start_call = SizeOfCodeGeneratedSince(&start_call);
     // Here we are going to patch the `addi` instruction above to use the
     // correct offset.
-    // LoadPC emits two instructions and pc is the address of its second emitted
-    // instruction. Add one more to the offset to point to after the Call.
-    offset_since_start_call += kInstrSize;
     patch_pc_address(pc_scratch, start_pc_offset, offset_since_start_call);
 
     int before_offset = pc_offset();
@@ -2691,55 +2606,19 @@ void MacroAssembler::DivU32(Register dst, Register src, Register value, OEBit s,
 }
 
 void MacroAssembler::ModS64(Register dst, Register src, Register value) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
-    modsd(dst, src, value);
-  } else {
-    Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
-    Push(scratch);
-    divd(scratch, src, value);
-    mulld(scratch, scratch, value);
-    sub(dst, src, scratch);
-    Pop(scratch);
-  }
+  modsd(dst, src, value);
 }
 
 void MacroAssembler::ModU64(Register dst, Register src, Register value) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
-    modud(dst, src, value);
-  } else {
-    Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
-    Push(scratch);
-    divdu(scratch, src, value);
-    mulld(scratch, scratch, value);
-    sub(dst, src, scratch);
-    Pop(scratch);
-  }
+  modud(dst, src, value);
 }
 
 void MacroAssembler::ModS32(Register dst, Register src, Register value) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
-    modsw(dst, src, value);
-  } else {
-    Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
-    Push(scratch);
-    divw(scratch, src, value);
-    mullw(scratch, scratch, value);
-    sub(dst, src, scratch);
-    Pop(scratch);
-  }
+  modsw(dst, src, value);
   extsw(dst, dst);
 }
 void MacroAssembler::ModU32(Register dst, Register src, Register value) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
-    moduw(dst, src, value);
-  } else {
-    Register scratch = GetRegisterThatIsNotOneOf(dst, src, value);
-    Push(scratch);
-    divwu(scratch, src, value);
-    mullw(scratch, scratch, value);
-    sub(dst, src, scratch);
-    Pop(scratch);
-  }
+  moduw(dst, src, value);
   ZeroExtWord32(dst, dst);
 }
 
@@ -4924,8 +4803,7 @@ void MacroAssembler::CallJSDispatchEntry(JSDispatchHandle dispatch_handle,
   static_assert(!JSDispatchTable::kSupportsCompaction);
   LoadEntrypointFromJSDispatchTable(code, dispatch_handle_reg, scratch);
   CHECK_EQ(argument_count,
-           IsolateGroup::current()->js_dispatch_table()->GetParameterCount(
-               dispatch_handle));
+           isolate()->js_dispatch_table().GetParameterCount(dispatch_handle));
   Call(code);
 }
 
@@ -4979,7 +4857,7 @@ void MacroAssembler::StoreReturnAddressAndCall(Register target) {
   // currently being generated) is immovable or that the callee function cannot
   // trigger GC, since the callee function will return to it.
 
-  static constexpr int after_call_offset = 5 * kInstrSize;
+  static constexpr int after_call_offset = 4 * kInstrSize;
   Label start_call;
   Register dest = target;
 
@@ -5001,8 +4879,7 @@ void MacroAssembler::StoreReturnAddressAndCall(Register target) {
   StoreU64(r7, MemOperand(sp, kStackFrameExtraParamSlot * kSystemPointerSize));
   Call(dest);
 
-  DCHECK_EQ(after_call_offset - kInstrSize,
-            SizeOfCodeGeneratedSince(&start_call));
+  DCHECK_EQ(after_call_offset, SizeOfCodeGeneratedSince(&start_call));
 }
 
 void MacroAssembler::AssertNotDeoptimized(Register scratch) {
@@ -5054,39 +4931,15 @@ void MacroAssembler::CountLeadingZerosU64(Register dst, Register src, RCBit r) {
   cntlzd(dst, src, r);
 }
 
-#define COUNT_TRAILING_ZEROES_SLOW(max_count, scratch1, scratch2) \
-  Label loop, done;                                               \
-  li(scratch1, Operand(max_count));                               \
-  mtctr(scratch1);                                                \
-  mr(scratch1, src);                                              \
-  li(dst, Operand::Zero());                                       \
-  bind(&loop); /* while ((src & 1) == 0) */                       \
-  andi(scratch2, scratch1, Operand(1));                           \
-  bne(&done, cr0);                                                \
-  srdi(scratch1, scratch1, Operand(1)); /* src >>= 1;*/           \
-  addi(dst, dst, Operand(1));           /* dst++ */               \
-  bdnz(&loop);                                                    \
-  bind(&done);
 void MacroAssembler::CountTrailingZerosU32(Register dst, Register src,
-                                           Register scratch1, Register scratch2,
                                            RCBit r) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
     cnttzw(dst, src, r);
-  } else {
-    COUNT_TRAILING_ZEROES_SLOW(32, scratch1, scratch2);
-  }
 }
 
 void MacroAssembler::CountTrailingZerosU64(Register dst, Register src,
-                                           Register scratch1, Register scratch2,
                                            RCBit r) {
-  if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
     cnttzd(dst, src, r);
-  } else {
-    COUNT_TRAILING_ZEROES_SLOW(64, scratch1, scratch2);
-  }
 }
-#undef COUNT_TRAILING_ZEROES_SLOW
 
 void MacroAssembler::ClearByteU64(Register dst, int byte_idx) {
   CHECK(0 <= byte_idx && byte_idx <= 7);
@@ -5168,7 +5021,7 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
     // The entry references a CodeWrapper object. Unwrap it now.
     LoadTaggedField(
         scratch_and_result,
-        FieldMemOperand(scratch_and_result, CodeWrapper::kCodeOffset));
+        FieldMemOperand(scratch_and_result, offsetof(CodeWrapper, code_)));
 
     UseScratchRegisterScope temps(this);
     Register temp = temps.Acquire();
@@ -5205,7 +5058,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ExternalReference thunk_ref, Register thunk_arg,
                               int slots_to_drop_on_return,
                               MemOperand* argc_operand,
-                              MemOperand return_value_operand) {
+                              MemOperand return_value_operand,
+                              bool handle_interceptor_result) {
   using ER = ExternalReference;
 
   Isolate* isolate = masm->isolate();
@@ -5228,14 +5082,14 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   Register prev_limit_reg = r15;
   Register prev_level_reg = r16;
 
-  // C arguments (kCArgRegs[0/1]) are expected to be initialized outside, so
+  // C arguments (kCArgRegs[0/1/2]) are expected to be initialized outside, so
   // this function must not corrupt them (return_value overlaps with
   // kCArgRegs[0] but that's ok because we start using it only after the C
   // call).
-  DCHECK(!AreAliased(kCArgRegs[0], kCArgRegs[1],  // C args
+  DCHECK(!AreAliased(kCArgRegs[0], kCArgRegs[1], kCArgRegs[2],  // C args
                      scratch, scratch2, prev_next_address_reg, prev_limit_reg));
   // function_address and thunk_arg might overlap but this function must not
-  // corrupted them until the call is made (i.e. overlap with return_value is
+  // corrupt them until the call is made (i.e. overlap with return_value is
   // fine).
   DCHECK(!AreAliased(function_address,  // incoming parameters
                      scratch, scratch2, prev_next_address_reg, prev_limit_reg));
@@ -5251,7 +5105,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     __ stw(scratch, level_mem_op);
   }
 
-  Label profiler_or_side_effects_check_enabled, done_api_call;
+  Label profiler_or_side_effects_check_enabled, done_api_call,
+      done_reading_result;
   if (with_profiling) {
     __ RecordComment("Check if profiler or side effects check is enabled");
     __ lbz(scratch,
@@ -5271,6 +5126,18 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   __ StoreReturnAddressAndCall(function_address);
   __ bind(&done_api_call);
 
+  if (handle_interceptor_result) {
+    // Skip reading return value if the callback returned kInterceptedNo,
+    // this would make the builtin return kNotInterceptedSentinel value.
+    // Size is important here, otherwise the C++ function could have returned
+    // one- or two-byte value with junk in the upper part.
+    static_assert(kInterceptedNo == 1 && kInterceptedSize == 4);
+    static_assert(kInterceptedNo == kNotInterceptedSentinel);
+    static_assert(kInterceptedYes == 0);
+    __ andi(r0, return_value, Operand(1));
+    __ b(to_condition(kNotZero), &done_reading_result);
+  }
+
   Label propagate_exception;
   Label delete_allocated_handles;
   Label leave_exit_frame;
@@ -5278,6 +5145,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   // load value from ReturnValue
   __ RecordComment("Load the value from ReturnValue");
   __ LoadU64(r3, return_value_operand);
+  __ bind(&done_reading_result);
 
   {
     ASM_CODE_COMMENT_STRING(
@@ -5316,8 +5184,16 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     __ bne(&propagate_exception);
   }
 
-  __ AssertJSAny(return_value, scratch, scratch2,
-                 AbortReason::kAPICallReturnedInvalidObject);
+  if (v8_flags.debug_code) {
+    Label ok;
+    if (handle_interceptor_result) {
+      __ Cmp(return_value, kNotInterceptedSentinel);
+      __ beq(&ok);
+    }
+    __ AssertJSAny(return_value, scratch, scratch2,
+                   AbortReason::kAPICallReturnedInvalidObject);
+    __ bind(&ok);
+  }
 
   if (argc_operand == nullptr) {
     DCHECK_NE(slots_to_drop_on_return, 0);
@@ -5335,7 +5211,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   if (with_profiling) {
     ASM_CODE_COMMENT_STRING(masm, "Call the api function via the thunk.");
     __ bind(&profiler_or_side_effects_check_enabled);
-    // Additional parameter is the address of the actual callback function.
+    // Additional parameter if provided.
     if (thunk_arg.is_valid()) {
       MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
           IsolateFieldId::kApiCallbackThunkArgument);
@@ -5380,8 +5256,8 @@ void MacroAssembler::Switch(Register scratch, Register value,
   ShiftLeftU32(value, value, Operand(entry_size_log2));
 
   Assembler::BlockTrampolinePoolScope block_trampoline_pool(this);
-  // offset = size of (mflr, addi, add, mtctr, bctr)
-  constexpr int offset = 20;
+  // offset = size of (addi, add, mtctr, bctr)
+  constexpr int offset = 16;
   LoadPC(scratch);
   addi(scratch, scratch, Operand(offset));
   add(scratch, scratch, value);

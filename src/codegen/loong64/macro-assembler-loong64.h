@@ -92,6 +92,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void InitializeRootRegister() {
     ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
     li(kRootRegister, Operand(isolate_root));
+    // TODO(loong64_dev): Initialize kDoubleRegZero for use by cctest.
+    movgr2fr_d(kDoubleRegZero, zero_reg);
 #ifdef V8_COMPRESS_POINTERS
     LoadRootRelative(kPtrComprCageBaseRegister,
                      IsolateData::cage_base_offset());
@@ -180,12 +182,20 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void BranchTrueF(Label* target, CFRegister cc = FCC0);
   void BranchFalseF(Label* target, CFRegister cc = FCC0);
 
+  void BranchLSX(Label* target, LSXBranchDF df, LSXBranchCondition cond,
+                 VRegister vj, CFRegister cc = FCC0);
+  void BranchShortLSX(Label* target, LSXBranchDF df, LSXBranchCondition cond,
+                      VRegister vj, CFRegister cc = FCC0);
+
   static int InstrCountForLi64Bit(int64_t value);
   inline void LiLower32BitHelper(Register rd, Operand j);
   void li_optimized(Register rd, Operand j, LiFlags mode = OPTIMIZE_SIZE);
   void li(Register rd, Operand j, LiFlags mode = OPTIMIZE_SIZE);
   inline void li(Register rd, int64_t j, LiFlags mode = OPTIMIZE_SIZE) {
     li(rd, Operand(j), mode);
+  }
+  inline void li(Register rd, uint64_t j, LiFlags mode = OPTIMIZE_SIZE) {
+    li(rd, Operand(static_cast<int64_t>(j)), mode);
   }
   inline void li(Register rd, int32_t j, LiFlags mode = OPTIMIZE_SIZE) {
     li(rd, Operand(static_cast<int64_t>(j)), mode);
@@ -413,6 +423,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void MultiPush(RegList regs1, RegList regs2);
   void MultiPush(RegList regs1, RegList regs2, RegList regs3);
   void MultiPushFPU(DoubleRegList regs);
+  void MultiPushLSX(DoubleRegList regs);
 
   // Calculate how much stack space (in bytes) are required to store caller
   // registers excluding those specified in the arguments.
@@ -460,6 +471,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void MultiPop(RegList regs1, RegList regs2, RegList regs3);
 
   void MultiPopFPU(DoubleRegList regs);
+  void MultiPopLSX(DoubleRegList regs);
 
   // These PushAll/PopAll respect the order of the registers in the stack from
   // low index to high.
@@ -578,6 +590,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void SmiTag(Register reg) { SmiTag(reg, reg); }
 
+  void SmiUntag(Register reg) { SmiUntag(reg, reg); }
   void SmiUntag(Register dst, const MemOperand& src);
   void SmiUntag(Register dst, Register src) {
     if (SmiValuesAre32Bits()) {
@@ -588,7 +601,16 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
     }
   }
 
-  void SmiUntag(Register reg) { SmiUntag(reg, reg); }
+  void SmiUntagUnsigned(Register reg) { SmiUntagUnsigned(reg, reg); }
+  void SmiUntagUnsigned(Register dst, const MemOperand& src);
+  void SmiUntagUnsigned(Register dst, Register src) {
+    if (SmiValuesAre32Bits()) {
+      srli_d(dst, src, kSmiShift);
+    } else {
+      DCHECK(SmiValuesAre31Bits());
+      srli_w(dst, src, kSmiShift);
+    }
+  }
 
   // Left-shifted from int32 equivalent of Smi.
   void SmiScale(Register dst, Register src, int scale) {
@@ -684,6 +706,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void TruncateDoubleToI(Isolate* isolate, Zone* zone, Register result,
                          DoubleRegister double_input, StubCallMode stub_mode);
 
+  void Float64Mod(DoubleRegister out, DoubleRegister left,
+                  DoubleRegister right);
+
   // Conditional move.
   void Movz(Register rd, Register rj, Register rk);
   void Movn(Register rd, Register rj, Register rk);
@@ -760,8 +785,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Float64MaxOutOfLine(FPURegister dst, FPURegister src1, FPURegister src2);
   void Float64MinOutOfLine(FPURegister dst, FPURegister src1, FPURegister src2);
 
-  bool IsDoubleZeroRegSet() { return has_double_zero_reg_set_; }
-
   void mov(Register rd, Register rj) { or_(rd, rj, zero_reg); }
 
   inline void Move(Register dst, Handle<HeapObject> handle) { li(dst, handle); }
@@ -784,6 +807,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   }
 
   void FmoveLow(FPURegister dst, Register src_low);
+
+  inline void Move(Register dst, FPURegister src) { movfr2gr_d(dst, src); }
+
+  inline void Move(FPURegister dst, Register src) { movgr2fr_d(dst, src); }
 
   inline void Move(FPURegister dst, FPURegister src) { Move_d(dst, src); }
 
@@ -845,6 +872,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef);
 
+  void LoadFeedbackCell(Register dst, Register closure);
+  void LoadFeedbackVectorFromCell(Register dst, Register feedback_cell,
+                                  Register scratch, Label* fbv_undef);
+
   void LoadInterpreterDataBytecodeArray(Register destination,
                                         Register interpreter_data);
   void LoadInterpreterDataInterpreterTrampoline(Register destination,
@@ -903,6 +934,27 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Round_s(FPURegister fd, FPURegister fj);
   void Floor_s(FPURegister fd, FPURegister fj);
   void Ceil_s(FPURegister fd, FPURegister fj);
+
+  // LSX
+  void Vst(VRegister vd, const MemOperand& vj, int* trap_pc = NULL);
+  void Vld(VRegister vd, const MemOperand& vj, int* trap_pc = NULL);
+  void Vmove(VRegister dst, VRegister src);
+  void LoadSplat(LSXSize, VRegister dst, MemOperand src, int* trap_pc = NULL);
+  void ExtAddPairwise(LSXDataType type, VRegister dst, VRegister src);
+  void LoadLane(LSXSize sz, VRegister dst, uint8_t laneidx, MemOperand src,
+                int* trap_pc = NULL);
+  void StoreLane(LSXSize sz, VRegister src, uint8_t laneidx, MemOperand dst,
+                 int* trap_pc = NULL);
+  void Dotp_w(VRegister dst, VRegister src1, VRegister src2,
+              VRegister temp = kSimd128ScratchReg);
+  void Dotp_h(VRegister dst, VRegister src1, VRegister src2,
+              VRegister temp = kSimd128ScratchReg);
+  void ExtMulLow(LSXDataType type, VRegister dst, VRegister src1,
+                 VRegister src2);
+  void ExtMulHigh(LSXDataType type, VRegister dst, VRegister src1,
+                  VRegister src2);
+  void LSXRoundW(VRegister dst, VRegister src, FPURoundingMode mode);
+  void LSXRoundD(VRegister dst, VRegister src, FPURoundingMode mode);
 
   // Jump the register contains a smi.
   void JumpIfSmi(Register value, Label* smi_label);
@@ -971,6 +1023,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Loads a field containing smi value and untags it.
   void SmiUntagField(Register dst, const MemOperand& src);
+  void SmiUntagFieldUnsigned(Register dst, const MemOperand& src);
 
   // Compresses and stores tagged value to given on-heap location.
   void StoreTaggedField(Register src, const MemOperand& dst,
@@ -1021,12 +1074,16 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // As above, but for kUnknownIndirectPointerTag. The type of the loaded object
   // is unknown, so this helper will check for a series of expected types and
   // jump to the given labels if the loaded object has a matching type. If the
-  // object has none of the expected types, the destination register will be
-  // zeroed and execution continues as fall-through.
+  // field is null (with enabled sandbox) or a Smi (with disabled sandbox) and
+  // the provided is_unavailable label is not a nullptr, then the helper will
+  // jump there. If the field is valid and the object has one of the expected
+  // types, then the helper will jump to the corresponding label. In all other
+  // cases, the destination register will be zeroed and execution continues as
+  // fall-through.
   void LoadTrustedUnknownPointerField(
       Register destination, MemOperand field_operand, Register scratch,
-      const std::initializer_list<std::tuple<InstanceType, Label*>>& cases);
-
+      const std::initializer_list<std::tuple<InstanceType, Label*>>& cases,
+      Label* is_unavailable = nullptr);
   // Store a trusted pointer field.
   void StoreTrustedPointerField(Register value, MemOperand dst_field_operand);
 
@@ -1046,7 +1103,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Only available when the sandbox is enabled, but always visible to avoid
   // having to place the #ifdefs into the caller.
   void LoadIndirectPointerField(Register destination, MemOperand field_operand,
-                                IndirectPointerTag tag);
+                                IndirectPointerTagRange tag_range);
 
   // Store an indirect pointer field.
   // Only available when the sandbox is enabled, but always visible to avoid
@@ -1058,20 +1115,13 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Retrieve the heap object referenced by the given indirect pointer handle,
   // which can either be a trusted pointer handle or a code pointer handle.
   void ResolveIndirectPointerHandle(Register destination, Register handle,
-                                    IndirectPointerTag tag);
+                                    IndirectPointerTagRange tag_range);
 
   // Retrieve the heap object referenced by the given trusted pointer handle.
   void ResolveTrustedPointerHandle(Register destination, Register handle,
-                                   IndirectPointerTag tag);
+                                   IndirectPointerTagRange tag_range);
   // Retrieve the Code object referenced by the given code pointer handle.
   void ResolveCodePointerHandle(Register destination, Register handle);
-
-  // Load the pointer to a Code's entrypoint via a code pointer.
-  // Only available when the sandbox is enabled as it requires the code pointer
-  // table.
-  void LoadCodeEntrypointViaCodePointer(Register destination,
-                                        MemOperand field_operand,
-                                        CodeEntrypointTag tag);
 
   // Load the value of Code pointer table corresponding to
   // IsolateGroup::current()->code_pointer_table_.
@@ -1081,9 +1131,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void LoadEntrypointFromJSDispatchTable(Register destination,
                                          Register dispatch_handle,
-                                         Register scratch);
-  void LoadEntrypointFromJSDispatchTable(Register destination,
-                                         JSDispatchHandle dispatch_handle,
                                          Register scratch);
   void LoadParameterCountFromJSDispatchTable(Register destination,
                                              Register dispatch_handle,
@@ -1416,7 +1463,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   inline int32_t GetOffset(Label* L, OffsetSize bits);
 
  private:
-  bool has_double_zero_reg_set_ = false;
 
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,
@@ -1506,7 +1552,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ExternalReference thunk_ref, Register thunk_arg,
                               int slots_to_drop_on_return,
                               MemOperand* argc_operand,
-                              MemOperand return_value_operand);
+                              MemOperand return_value_operand,
+                              bool handle_interceptor_result);
 
 }  // namespace internal
 }  // namespace v8

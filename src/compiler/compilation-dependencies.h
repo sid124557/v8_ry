@@ -104,6 +104,7 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
 
   // Convenience wrappers around {DependOnProtector}.
   bool DependOnArrayBufferDetachingProtector();
+  bool DependOnArrayBufferMutableProtector();
   bool DependOnArrayIteratorProtector();
   bool DependOnArraySpeciesProtector();
   bool DependOnNoElementsProtector();
@@ -181,6 +182,9 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
   CompilationDependency const* FieldRepresentationDependencyOffTheRecord(
       MapRef map, MapRef owner, InternalIndex descriptor,
       Representation representation) const;
+  void DependOnFieldRepresentation(MapRef map, MapRef owner,
+                                   InternalIndex descriptor,
+                                   Representation representation);
 
   // Gather the assumption that the field type of a field does not change. The
   // field is identified by the arguments.

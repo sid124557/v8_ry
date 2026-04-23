@@ -100,17 +100,13 @@
 // Arguments are JSName (the name with a 'JS' prefix), and Name.
 #define JS_COMPARE_BINOP_COMMON_LIST(V) \
   V(JSEqual, Equal)                     \
+  V(JSStrictEqual, StrictEqual)         \
   V(JSLessThan, LessThan)               \
   V(JSGreaterThan, GreaterThan)         \
   V(JSLessThanOrEqual, LessThanOrEqual) \
   V(JSGreaterThanOrEqual, GreaterThanOrEqual)
 
-#define JS_COMPARE_BINOP_WITH_EMBEDDED_FEEDBACK_LIST(V) \
-  V(JSStrictEqual, StrictEqual)
-
-#define JS_COMPARE_BINOP_LIST(V)  \
-  JS_COMPARE_BINOP_COMMON_LIST(V) \
-  JS_COMPARE_BINOP_WITH_EMBEDDED_FEEDBACK_LIST(V)
+#define JS_COMPARE_BINOP_LIST(V) JS_COMPARE_BINOP_COMMON_LIST(V)
 
 #define JS_BITWISE_BINOP_LIST(V) \
   V(JSBitwiseOr, BitwiseOr)      \
@@ -234,6 +230,7 @@
 #define JS_OTHER_OP_LIST(V)            \
   JS_CALL_OP_LIST(V)                   \
   JS_CONSTRUCT_OP_LIST(V)              \
+  V(JSAsyncFunctionAwait)              \
   V(JSAsyncFunctionEnter)              \
   V(JSAsyncFunctionReject)             \
   V(JSAsyncFunctionResolve)            \
@@ -280,6 +277,7 @@
   V(ChangeTaggedToUint32)                     \
   V(ChangeTaggedToFloat64)                    \
   V(ChangeTaggedToTaggedSigned)               \
+  V(ChangeSmiOrHoleToFloat64)                 \
   V(ChangeNumberOrHoleToFloat64)              \
   V(ChangeInt31ToTaggedSigned)                \
   V(ChangeInt32ToTagged)                      \
@@ -295,6 +293,7 @@
   V(ChangeUint64ToBigInt)                     \
   V(TruncateBigIntToWord64)                   \
   V(TruncateNumberOrOddballToWord32)          \
+  V(TruncateSmiOrHoleToWord32)                \
   V(TruncateNumberOrOddballOrHoleToWord32)    \
   V(TruncateTaggedToFloat64)                  \
   V(TruncateTaggedToFloat64PreserveUndefined) \
@@ -329,6 +328,7 @@
   V(CheckedUint64ToTaggedSigned)         \
   V(CheckedFloat64ToInt32)               \
   V(CheckedFloat64ToInt64)               \
+  V(CheckedFloat64ToUint64)              \
   V(CheckedFloat64ToAdditiveSafeInteger) \
   V(CheckedTaggedSignedToInt32)          \
   V(CheckedTaggedToInt32)                \
@@ -337,6 +337,7 @@
   V(CheckedTaggedToFloat64)              \
   V(CheckedTaggedToAdditiveSafeInteger)  \
   V(CheckedTaggedToInt64)                \
+  V(CheckedTaggedToUint64)               \
   V(CheckedTaggedToTaggedSigned)         \
   V(CheckedTaggedToTaggedPointer)
 
@@ -479,6 +480,7 @@
   V(CheckIf)                                \
   V(CheckInternalizedString)                \
   V(CheckMaps)                              \
+  V(CheckHomomorphic)                       \
   V(CheckNotTaggedHole)                     \
   V(CheckNumber)                            \
   V(CheckNumberOrUndefined)                 \
@@ -882,8 +884,8 @@
   V(Word32PairShl)                       \
   V(Word32PairShr)                       \
   V(Word32PairSar)                       \
-  V(ProtectedLoad)                       \
-  V(ProtectedStore)                      \
+  V(TrappingLoad)                        \
+  V(TrappingStore)                       \
   V(LoadTrapOnNull)                      \
   V(StoreTrapOnNull)                     \
   V(MemoryBarrier)                       \
@@ -900,6 +902,7 @@
   IF_WASM(V, F64x2Splat)                  \
   IF_WASM(V, F64x2ExtractLane)            \
   IF_WASM(V, F64x2ReplaceLane)            \
+  IF_WASM(V, F64x2MoveLane)               \
   IF_WASM(V, F64x2Abs)                    \
   IF_WASM(V, F64x2Neg)                    \
   IF_WASM(V, F64x2Sqrt)                   \
@@ -927,6 +930,7 @@
   IF_WASM(V, F32x4Splat)                  \
   IF_WASM(V, F32x4ExtractLane)            \
   IF_WASM(V, F32x4ReplaceLane)            \
+  IF_WASM(V, F32x4MoveLane)               \
   IF_WASM(V, F32x4SConvertI32x4)          \
   IF_WASM(V, F32x4UConvertI32x4)          \
   IF_WASM(V, F32x4Abs)                    \
@@ -956,6 +960,7 @@
   IF_WASM(V, F16x8Splat)                  \
   IF_WASM(V, F16x8ExtractLane)            \
   IF_WASM(V, F16x8ReplaceLane)            \
+  IF_WASM(V, F16x8MoveLane)               \
   IF_WASM(V, F16x8Abs)                    \
   IF_WASM(V, F16x8Neg)                    \
   IF_WASM(V, F16x8Sqrt)                   \
@@ -990,6 +995,7 @@
   IF_WASM(V, I64x2SplatI32Pair)           \
   IF_WASM(V, I64x2ExtractLane)            \
   IF_WASM(V, I64x2ReplaceLane)            \
+  IF_WASM(V, I64x2MoveLane)               \
   IF_WASM(V, I64x2ReplaceLaneI32Pair)     \
   IF_WASM(V, I64x2Abs)                    \
   IF_WASM(V, I64x2Neg)                    \
@@ -1015,6 +1021,7 @@
   IF_WASM(V, I32x4Splat)                  \
   IF_WASM(V, I32x4ExtractLane)            \
   IF_WASM(V, I32x4ReplaceLane)            \
+  IF_WASM(V, I32x4MoveLane)               \
   IF_WASM(V, I32x4SConvertF32x4)          \
   IF_WASM(V, I32x4SConvertI16x8Low)       \
   IF_WASM(V, I32x4SConvertI16x8High)      \
@@ -1058,6 +1065,7 @@
   IF_WASM(V, I16x8ExtractLaneU)           \
   IF_WASM(V, I16x8ExtractLaneS)           \
   IF_WASM(V, I16x8ReplaceLane)            \
+  IF_WASM(V, I16x8MoveLane)               \
   IF_WASM(V, I16x8SConvertI8x16Low)       \
   IF_WASM(V, I16x8SConvertI8x16High)      \
   IF_WASM(V, I16x8Neg)                    \
@@ -1103,6 +1111,7 @@
   IF_WASM(V, I8x16ExtractLaneU)           \
   IF_WASM(V, I8x16ExtractLaneS)           \
   IF_WASM(V, I8x16ReplaceLane)            \
+  IF_WASM(V, I8x16MoveLane)               \
   IF_WASM(V, I8x16SConvertI16x8)          \
   IF_WASM(V, I8x16Neg)                    \
   IF_WASM(V, I8x16Shl)                    \

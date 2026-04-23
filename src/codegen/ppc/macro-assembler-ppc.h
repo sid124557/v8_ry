@@ -270,10 +270,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void CountLeadingZerosU32(Register dst, Register src, RCBit r = LeaveRC);
   void CountLeadingZerosU64(Register dst, Register src, RCBit r = LeaveRC);
-  void CountTrailingZerosU32(Register dst, Register src, Register scratch1 = ip,
-                             Register scratch2 = r0, RCBit r = LeaveRC);
-  void CountTrailingZerosU64(Register dst, Register src, Register scratch1 = ip,
-                             Register scratch2 = r0, RCBit r = LeaveRC);
+  void CountTrailingZerosU32(Register dst, Register src, RCBit r = LeaveRC);
+  void CountTrailingZerosU64(Register dst, Register src, RCBit r = LeaveRC);
 
   void ClearByteU64(Register dst, int byte_idx);
   void ReverseBitsU64(Register dst, Register src, Register scratch1,
@@ -970,6 +968,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef);
 
+  void LoadFeedbackCell(Register dst, Register closure);
+  void LoadFeedbackVectorFromCell(Register dst, Register feedback_cell,
+                                  Register scratch, Label* fbv_undef);
+
   void LoadInterpreterDataBytecodeArray(Register destination,
                                         Register interpreter_data);
   void LoadInterpreterDataInterpreterTrampoline(Register destination,
@@ -986,26 +988,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Usage: call the appropriate arithmetic function and then call one of the
   // flow control functions with the corresponding label.
   void MoveToCrFromXer(CRegister cr) {
-    if (CpuFeatures::IsSupported(PPC_9_PLUS)) {
       mcrxrx(cr);
-    } else {
-      mcrxr(cr);
-    }
   }
-
-  // Compute dst = left + right, setting condition codes. dst may be same as
-  // either left or right (or a unique register). left and right must not be
-  // the same register.
-  void AddAndCheckForOverflow(Register dst, Register left, Register right,
-                              Register overflow_dst, Register scratch = r0);
-  void AddAndCheckForOverflow(Register dst, Register left, intptr_t right,
-                              Register overflow_dst, Register scratch = r0);
-
-  // Compute dst = left - right, setting condition codes. dst may be same as
-  // either left or right (or a unique register). left and right must not be
-  // the same register.
-  void SubAndCheckForOverflow(Register dst, Register left, Register right,
-                              Register overflow_dst, Register scratch = r0);
 
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
@@ -1906,7 +1890,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ExternalReference thunk_ref, Register thunk_arg,
                               int slots_to_drop_on_return,
                               MemOperand* argc_operand,
-                              MemOperand return_value_operand);
+                              MemOperand return_value_operand,
+                              bool handle_interceptor_result);
 
 #define ACCESS_MASM(masm) masm->
 

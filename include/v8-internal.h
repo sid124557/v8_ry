@@ -229,6 +229,12 @@ constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
 // 16 GB so that the base address + size for the emulated virtual address space
 // lies within the 64 GB total virtual address space.
 constexpr size_t kSandboxSizeLog2 = 34;  // 16 GB
+#elif defined(V8_HOST_ARCH_RISCV64)
+// Most RISC-V hardware currently uses Sv39 (39-bit VA, 256GB userspace).
+// Limit the sandbox to 128GB (a quarter of Sv39 userspace) to avoid exceeding
+// the available virtual address space. Uses V8_HOST_ARCH so that simulator
+// builds on x64 are not unnecessarily constrained.
+constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
 #else
 // Everywhere else use a 1TB sandbox.
 constexpr size_t kSandboxSizeLog2 = 40;  // 1 TB
@@ -247,18 +253,6 @@ constexpr size_t kSandboxAlignment = kPtrComprCageBaseAlignment;
 // smaller than the sandbox size after shifting it to the right again. This
 // constant specifies the shift amount.
 constexpr uint64_t kSandboxedPointerShift = 64 - kSandboxSizeLog2;
-
-// Size of the guard regions surrounding the sandbox. This assumes a worst-case
-// scenario of a 32-bit unsigned index used to access an array of 64-bit values
-// with an additional 4GB (compressed pointer) offset. In particular, accesses
-// to TypedArrays are effectively computed as
-// `entry_pointer = array->base + array->offset + index * array->element_size`.
-// See also https://crbug.com/40070746 for more details.
-constexpr size_t kSandboxGuardRegionSize = 32ULL * GB + 4ULL * GB;
-
-static_assert((kSandboxGuardRegionSize % kSandboxAlignment) == 0,
-              "The size of the guard regions around the sandbox must be a "
-              "multiple of its required alignment.");
 
 // On OSes where reserving virtual memory is too expensive to reserve the
 // entire address space backing the sandbox, notably Windows pre 8.1, we create
@@ -281,15 +275,42 @@ static_assert(kSandboxMinimumReservationSize > kPtrComprCageReservationSize,
 // able to construct a buffer that appears larger than the guard regions and
 // thereby "reach out of" the sandbox.
 constexpr size_t kMaxSafeBufferSizeForSandbox = 32ULL * GB - 1;
-static_assert(kMaxSafeBufferSizeForSandbox <= kSandboxGuardRegionSize,
-              "The maximum allowed buffer size must not be larger than the "
-              "sandbox's guard regions");
 
 constexpr size_t kBoundedSizeShift = 29;
 static_assert(1ULL << (64 - kBoundedSizeShift) ==
                   kMaxSafeBufferSizeForSandbox + 1,
               "The maximum size of a BoundedSize must be synchronized with the "
               "kMaxSafeBufferSizeForSandbox");
+constexpr size_t kBoundedSizeMask = (1ULL << (64 - kBoundedSizeShift)) - 1;
+
+// Size of the guard regions surrounding the sandbox. This assumes a worst-case
+// scenario of a 32-bit unsigned index used to access an array of 64-bit values
+// with an additional 32GB (bounded size) offset. In particular, accesses to
+// TypedArrays are effectively computed as
+// `entry_pointer = array->base + array->offset + index * array->element_size`.
+// See also https://crbug.com/40070746 for more details.
+constexpr size_t kSandboxGuardRegionSize =
+    32ULL * GB + (kMaxSafeBufferSizeForSandbox + 1);
+
+static_assert((kSandboxGuardRegionSize % kSandboxAlignment) == 0,
+              "The size of the guard regions around the sandbox must be a "
+              "multiple of its required alignment.");
+static_assert(kMaxSafeBufferSizeForSandbox <= kSandboxGuardRegionSize,
+              "The maximum allowed buffer size must not be larger than the "
+              "sandbox's guard regions");
+
+#if defined(V8_TARGET_OS_ANDROID)
+// On Android, we often won't have sufficient virtual address space available.
+constexpr size_t kAdditionalTrailingGuardRegionSize = 0;
+#else
+// Worst-case, we need 8 (max element size) * 32GB (max ArrayBuffer size) +
+// 32GB (additional bounded size offset for TypedArray access).
+constexpr size_t kAdditionalTrailingGuardRegionSize =
+    288ULL * GB - kSandboxGuardRegionSize;
+#endif
+
+constexpr bool kRequiresTypedArrayAccessMasks =
+    kAdditionalTrailingGuardRegionSize == 0;
 
 #endif  // V8_ENABLE_SANDBOX
 
@@ -320,9 +341,10 @@ constexpr size_t kExternalPointerTableReservationSize = 512 * MB;
 constexpr uint32_t kExternalPointerIndexShift = 6;
 #endif  // V8_TARGET_OS_ANDROID
 
-// The maximum number of entries in an external pointer table.
+// The byte size of an entry in an external pointer table.
 constexpr int kExternalPointerTableEntrySize = 8;
 constexpr int kExternalPointerTableEntrySizeLog2 = 3;
+// The maximum number of entries in an external pointer table.
 constexpr size_t kMaxExternalPointers =
     kExternalPointerTableReservationSize / kExternalPointerTableEntrySize;
 static_assert((1 << (32 - kExternalPointerIndexShift)) == kMaxExternalPointers,
@@ -451,6 +473,35 @@ constexpr size_t kMaxCppHeapPointers = 0;
 // the type check to use even fewer instructions (essentially replace a AND +
 // SUB with a single AND).
 //
+// Tag ranges can also to a limited degree be used for union types. For
+// example, with the type graph as above, it would be possible to specify a
+// Union(D, E, F) as the tag range [D, F]. However, this only works as long as
+// the (otherwise independent) types that form the union have adjacent tags.
+//
+//
+// There are broadly speaking two options for performing the type check when
+// given the expected type range and the actual tag of the entry.
+//
+// The first option is to simply have the equivalent of
+//
+//     CHECK(expected_tag_range.Contains(actual_tag))
+//
+// This is nice and simple, and friendly to both the branch-predictor and the
+// user/developer as it produces clear error messages. However, this approach
+// may result in quite a bit of code being generated, for example for calling
+// RuntimeAbort from generated code or similar.
+//
+// The second option is to generate code such as
+//
+//     if (!expected_tag_range.Contains(actual_tag)) return nullptr;
+//
+// With this, we are also guaranteed to crash safely when the returned pointer
+// is used, but this may result in significantly less code being generated, for
+// example because the compiler can implement this with a single conditional
+// select in combination with the zero register (e.g. on Arm).
+//
+// The choice of which approach to use therefore depends on the use case, the
+// performance and code size constraints, and the importance of debuggability.
 template <typename Tag>
 struct TagRange {
   static_assert(std::is_enum_v<Tag> &&
@@ -458,7 +509,12 @@ struct TagRange {
                 "Tag parameter must be an enum with base type uint16_t");
 
   // Construct the inclusive tag range [first, last].
-  constexpr TagRange(Tag first, Tag last) : first(first), last(last) {}
+  constexpr TagRange(Tag first, Tag last) : first(first), last(last) {
+#ifdef V8_ENABLE_CHECKS
+    // This would typically be a DCHECK, but that's not available here.
+    if (first > last) __builtin_unreachable();  // Invalid tag range.
+#endif
+  }
 
   // Construct a tag range consisting of a single tag.
   //
@@ -504,9 +560,54 @@ struct TagRange {
   }
 
   // Internally we represent tag ranges as closed ranges [first, last].
-  const Tag first;
-  const Tag last;
+  Tag first;
+  Tag last;
 };
+
+#define SHARED_MANAGED_TAG_LIST(V) V(WasmFutexManagedObjectWaitListTag)
+
+#define MANAGED_TAG_LIST(V)          \
+  SHARED_MANAGED_TAG_LIST(V)         \
+  V(GenericManagedTag)               \
+  V(WasmWasmStreamingTag)            \
+  V(WasmFuncDataTag)                 \
+  V(WasmManagedDataTag)              \
+  V(WasmNativeModuleTag)             \
+  V(BackingStoreTag)                 \
+  V(CFunctionWithSignatureTag)       \
+  V(IcuBreakIteratorTag)             \
+  V(IcuListFormatterTag)             \
+  V(IcuLocaleTag)                    \
+  V(IcuSimpleDateFormatTag)          \
+  V(IcuDateIntervalFormatTag)        \
+  V(IcuRelativeDateTimeFormatterTag) \
+  V(IcuLocalizedNumberFormatterTag)  \
+  V(IcuPluralRulesTag)               \
+  V(IcuCollatorTag)                  \
+  V(IcuBreakIteratorWithTextTag)     \
+  V(TemporalDurationTag)             \
+  V(TemporalInstantTag)              \
+  V(TemporalPlainDateTag)            \
+  V(TemporalPlainTimeTag)            \
+  V(TemporalPlainDateTimeTag)        \
+  V(TemporalPlainYearMonthTag)       \
+  V(TemporalPlainMonthDayTag)        \
+  V(TemporalZonedDateTimeTag)        \
+  V(DisplayNamesInternalTag)         \
+  V(D8WorkerTag)                     \
+  V(D8ModuleEmbedderDataTag)
+
+#define FOREIGN_TAG_LIST(V)                               \
+  V(GenericForeignTag)                                    \
+  V(ApiAccessCheckCallbackTag)                            \
+  V(ApiAbortScriptExecutionCallbackTag)                   \
+  V(SyntheticModuleTag)                                   \
+  V(MicrotaskCallbackTag)                                 \
+  V(MicrotaskCallbackDataTag)                             \
+  V(MessageListenerTag)                                   \
+  V(WaiterQueueForeignTag)                                \
+  /* Needs to stay last to form a range for resources. */ \
+  MANAGED_TAG_LIST(V)
 
 //
 // External Pointers.
@@ -607,60 +708,21 @@ enum ExternalPointerTag : uint16_t {
   kApiIndexedPropertyDefinerCallbackTag,
   kApiIndexedPropertyDeleterCallbackTag,
   kApiIndexedPropertyEnumeratorCallbackTag,
+  kApiIndexedPropertyIndexOfCallbackTag,
   kLastInterceptorInfoExternalPointerTag =
-      kApiIndexedPropertyEnumeratorCallbackTag,
+      kApiIndexedPropertyIndexOfCallbackTag,
 
   kLastMaybeReadOnlyExternalPointerTag = kLastInterceptorInfoExternalPointerTag,
 
   kWasmStackMemoryTag,
 
-  // Foreigns
-  kFirstForeignExternalPointerTag,
-  kGenericForeignTag = kFirstForeignExternalPointerTag,
+#define AS_ENUM(name) k##name,
+  FOREIGN_TAG_LIST(AS_ENUM)
 
-  kApiAccessCheckCallbackTag,
-  kApiAbortScriptExecutionCallbackTag,
-  kSyntheticModuleTag,
-  kMicrotaskCallbackTag,
-  kMicrotaskCallbackDataTag,
-  kCFunctionTag,
-  kCFunctionInfoTag,
-  kMessageListenerTag,
-  kWaiterQueueForeignTag,
+#undef AS_ENUM
 
-  // Managed
-  kFirstManagedResourceTag,
-  kFirstManagedExternalPointerTag = kFirstManagedResourceTag,
-  kGenericManagedTag = kFirstManagedExternalPointerTag,
-  kWasmWasmStreamingTag,
-  kWasmFuncDataTag,
-  kWasmManagedDataTag,
-  kWasmNativeModuleTag,
-  kIcuBreakIteratorTag,
-  kIcuUnicodeStringTag,
-  kIcuListFormatterTag,
-  kIcuLocaleTag,
-  kIcuSimpleDateFormatTag,
-  kIcuDateIntervalFormatTag,
-  kIcuRelativeDateTimeFormatterTag,
-  kIcuLocalizedNumberFormatterTag,
-  kIcuPluralRulesTag,
-  kIcuCollatorTag,
-  kTemporalDurationTag,
-  kTemporalInstantTag,
-  kTemporalPlainDateTag,
-  kTemporalPlainTimeTag,
-  kTemporalPlainDateTimeTag,
-  kTemporalPlainYearMonthTag,
-  kTemporalPlainMonthDayTag,
-  kTemporalZonedDateTimeTag,
-  kDisplayNamesInternalTag,
-  kD8WorkerTag,
-  kD8ModuleEmbedderDataTag,
-  kLastForeignExternalPointerTag = kD8ModuleEmbedderDataTag,
-  kLastManagedExternalPointerTag = kLastForeignExternalPointerTag,
-  // External resources whose lifetime is tied to their entry in the external
-  // pointer table but which are not referenced via a Managed
+  // External resources whose lifetime is tied to their entry in the
+  // external pointer table but which are not referenced via a Managed
   kArrayBufferExtensionTag,
   kLastManagedResourceTag = kArrayBufferExtensionTag,
 
@@ -671,30 +733,89 @@ enum ExternalPointerTag : uint16_t {
   kLastExternalPointerTag = 0x7f,
 };
 
+constexpr const char* ToString(ExternalPointerTag tag) {
+  switch (tag) {
+#define ENUM_CASE(name)             \
+  case ExternalPointerTag::k##name: \
+    return #name;
+
+    FOREIGN_TAG_LIST(ENUM_CASE)
+
+#undef ENUM_CASE
+    default:
+      return "Unknown tag";
+  }
+}
+
 using ExternalPointerTagRange = TagRange<ExternalPointerTag>;
+
+#define AS_LIST(name) ExternalPointerTag::k##name,
+
+#define GET_FIRST(LIST)                           \
+  []() {                                          \
+    ExternalPointerTag items[] = {LIST(AS_LIST)}; \
+    return items[0];                              \
+  }()
+
+#define GET_LAST(LIST)                                    \
+  []() {                                                  \
+    ExternalPointerTag items[] = {LIST(AS_LIST)};         \
+    return items[(sizeof(items) / sizeof(items[0])) - 1]; \
+  }()
 
 constexpr ExternalPointerTagRange kAnyExternalPointerTagRange(
     kFirstExternalPointerTag, kLastExternalPointerTag);
-constexpr ExternalPointerTagRange kAnySharedExternalPointerTagRange(
-    kFirstSharedExternalPointerTag, kLastSharedExternalPointerTag);
+
+constexpr ExternalPointerTag kFirstForeignExternalPointerTag =
+    GET_FIRST(FOREIGN_TAG_LIST);
+constexpr ExternalPointerTag kLastForeignExternalPointerTag =
+    GET_LAST(FOREIGN_TAG_LIST);
 constexpr ExternalPointerTagRange kAnyForeignExternalPointerTagRange(
     kFirstForeignExternalPointerTag, kLastForeignExternalPointerTag);
 constexpr ExternalPointerTagRange kAnyInterceptorInfoExternalPointerTagRange(
     kFirstInterceptorInfoExternalPointerTag,
     kLastInterceptorInfoExternalPointerTag);
+
+constexpr ExternalPointerTag kFirstManagedExternalPointerTag =
+    GET_FIRST(MANAGED_TAG_LIST);
+constexpr ExternalPointerTag kLastManagedExternalPointerTag =
+    GET_LAST(MANAGED_TAG_LIST);
 constexpr ExternalPointerTagRange kAnyManagedExternalPointerTagRange(
     kFirstManagedExternalPointerTag, kLastManagedExternalPointerTag);
+
 constexpr ExternalPointerTagRange kAnyMaybeReadOnlyExternalPointerTagRange(
     kFirstMaybeReadOnlyExternalPointerTag,
     kLastMaybeReadOnlyExternalPointerTag);
+
+constexpr ExternalPointerTag kFirstManagedResourceTag =
+    GET_FIRST(MANAGED_TAG_LIST);
+// kLastManagedResourceTag defined in the enum.
 constexpr ExternalPointerTagRange kAnyManagedResourceExternalPointerTag(
     kFirstManagedResourceTag, kLastManagedResourceTag);
+
+constexpr ExternalPointerTag kFirstSharedManagedExternalPointerTag =
+    GET_FIRST(SHARED_MANAGED_TAG_LIST);
+constexpr ExternalPointerTag kLastSharedManagedExternalPointerTag =
+    GET_LAST(SHARED_MANAGED_TAG_LIST);
+constexpr ExternalPointerTagRange kAnySharedManagedExternalPointerTagRange(
+    kFirstSharedManagedExternalPointerTag,
+    kLastSharedManagedExternalPointerTag);
+
+#undef AS_LIST
+#undef GET_FIRST
+#undef GET_LAST
 
 // True if the external pointer must be accessed from the shared isolate's
 // external pointer table.
 V8_INLINE static constexpr bool IsSharedExternalPointerType(
     ExternalPointerTagRange tag_range) {
-  return kAnySharedExternalPointerTagRange.Contains(tag_range);
+  // This range should only be used together with
+  // kAnySharedManagedExternalPointerTagRange in this predicate. Therefore
+  // it is defined in this scope.
+  constexpr ExternalPointerTagRange kAnySharedExternalPointerTagRange(
+      kFirstSharedExternalPointerTag, kLastSharedExternalPointerTag);
+  return kAnySharedExternalPointerTagRange.Contains(tag_range) ||
+         kAnySharedManagedExternalPointerTagRange.Contains(tag_range);
 }
 
 // True if the external pointer may live in a read-only object, in which case
@@ -780,9 +901,10 @@ constexpr uint32_t kTrustedPointerHandleShift = 9;
 constexpr TrustedPointerHandle kNullTrustedPointerHandle =
     kNullIndirectPointerHandle;
 
-// The maximum number of entries in an trusted pointer table.
+// The byte size of an entry in the trusted pointer table.
 constexpr int kTrustedPointerTableEntrySize = 8;
 constexpr int kTrustedPointerTableEntrySizeLog2 = 3;
+// The maximum number of entries in the trusted pointer table.
 constexpr size_t kMaxTrustedPointers =
     kTrustedPointerTableReservationSize / kTrustedPointerTableEntrySize;
 static_assert((1 << (32 - kTrustedPointerHandleShift)) == kMaxTrustedPointers,
@@ -803,6 +925,9 @@ static_assert((1 << (32 - kTrustedPointerHandleShift)) == kMaxTrustedPointers,
 // its entrypoint.
 //
 // When the sandbox is disabled, these are regular tagged pointers.
+//
+// TODO(498510170): Removing these explicit code pointer handles is work in
+// progress.
 using CodePointerHandle = IndirectPointerHandle;
 
 // The size of the virtual memory reservation for the code pointer table.
@@ -812,7 +937,7 @@ constexpr size_t kCodePointerTableReservationSize = 128 * MB;
 
 // Code pointer handles are shifted by a different amount than indirect pointer
 // handles as the tables have a different maximum size.
-constexpr uint32_t kCodePointerHandleShift = 9;
+constexpr uint32_t kCodePointerHandleShift = 8;
 
 // A null handle always references an entry that contains nullptr.
 constexpr CodePointerHandle kNullCodePointerHandle = kNullIndirectPointerHandle;
@@ -828,17 +953,17 @@ constexpr uint32_t kCodePointerHandleMarker = 0x1;
 static_assert(kCodePointerHandleShift > 0);
 static_assert(kTrustedPointerHandleShift > 0);
 
+// The byte size of an entry in a code pointer table.
+constexpr int kCodePointerTableEntrySize = 8;
+constexpr int kCodePointerTableEntrySizeLog2 = 3;
 // The maximum number of entries in a code pointer table.
-constexpr int kCodePointerTableEntrySize = 16;
-constexpr int kCodePointerTableEntrySizeLog2 = 4;
 constexpr size_t kMaxCodePointers =
     kCodePointerTableReservationSize / kCodePointerTableEntrySize;
 static_assert(
     (1 << (32 - kCodePointerHandleShift)) == kMaxCodePointers,
     "kCodePointerTableReservationSize and kCodePointerHandleShift don't match");
 
-constexpr int kCodePointerTableEntryEntrypointOffset = 0;
-constexpr int kCodePointerTableEntryCodeObjectOffset = 8;
+constexpr int kCodePointerTableEntryCodeObjectOffset = 0;
 
 // Constants that can be used to mark places that should be modified once
 // certain types of objects are moved out of the sandbox and into trusted space.
@@ -938,15 +1063,11 @@ class Internals {
       2 * kApiSystemPointerSize + 2 * kApiInt32Size;
 
   // ExternalPointerTable and TrustedPointerTable layout guarantees.
-  static const int kExternalPointerTableBasePointerOffset = 0;
+  static const int kExternalEntityTableBasePointerOffset = 0;
   static const int kSegmentedTableSegmentPoolSize = 4;
-  static const int kExternalPointerTableSize =
+  static const int kExternalEntityTableSize =
       4 * kApiSystemPointerSize +
       kSegmentedTableSegmentPoolSize * sizeof(uint32_t);
-  static const int kTrustedPointerTableSize =
-      4 * kApiSystemPointerSize +
-      kSegmentedTableSegmentPoolSize * sizeof(uint32_t);
-  static const int kTrustedPointerTableBasePointerOffset = 0;
 
   // IsolateData layout guarantees.
   static const int kIsolateCageBaseOffset = 0;
@@ -990,38 +1111,42 @@ class Internals {
   static const int kIsolateExternalPointerTableOffset =
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
   static const int kIsolateSharedExternalPointerTableAddressOffset =
-      kIsolateExternalPointerTableOffset + kExternalPointerTableSize;
+      kIsolateExternalPointerTableOffset + kExternalEntityTableSize;
   static const int kIsolateCppHeapPointerTableOffset =
       kIsolateSharedExternalPointerTableAddressOffset + kApiSystemPointerSize;
 #ifdef V8_ENABLE_SANDBOX
   static const int kIsolateTrustedCageBaseOffset =
-      kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
+      kIsolateCppHeapPointerTableOffset + kExternalEntityTableSize;
   static const int kIsolateTrustedPointerTableOffset =
       kIsolateTrustedCageBaseOffset + kApiSystemPointerSize;
   static const int kIsolateSharedTrustedPointerTableAddressOffset =
-      kIsolateTrustedPointerTableOffset + kTrustedPointerTableSize;
+      kIsolateTrustedPointerTableOffset + kExternalEntityTableSize;
   static const int kIsolateTrustedPointerPublishingScopeOffset =
       kIsolateSharedTrustedPointerTableAddressOffset + kApiSystemPointerSize;
   static const int kIsolateCodePointerTableBaseAddressOffset =
       kIsolateTrustedPointerPublishingScopeOffset + kApiSystemPointerSize;
-  static const int kIsolateApiCallbackThunkArgumentOffset =
+  static const int kIsolateJSDispatchTableOffset =
       kIsolateCodePointerTableBaseAddressOffset + kApiSystemPointerSize;
 #else
-  static const int kIsolateApiCallbackThunkArgumentOffset =
-      kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
+  static const int kIsolateJSDispatchTableOffset =
+      kIsolateCppHeapPointerTableOffset + kExternalEntityTableSize;
 #endif  // V8_ENABLE_SANDBOX
 #else
-  static const int kIsolateApiCallbackThunkArgumentOffset =
+  static const int kIsolateJSDispatchTableOffset =
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
 #endif  // V8_COMPRESS_POINTERS
-  static const int kJSDispatchTableOffset =
-      kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
+  static const int kIsolateApiCallbackThunkArgumentOffset =
+      kIsolateJSDispatchTableOffset + kExternalEntityTableSize;
   static const int kIsolateRegexpExecVectorArgumentOffset =
-      kJSDispatchTableOffset + kApiSystemPointerSize;
+      kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
   static const int kContinuationPreservedEmbedderDataOffset =
       kIsolateRegexpExecVectorArgumentOffset + kApiSystemPointerSize;
-  static const int kIsolateRootsOffset =
+  static const int kCurrentMicrotaskQueueOffset =
       kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
+  static const int kCurrentMicrotaskNativeContextOffset =
+      kCurrentMicrotaskQueueOffset + kApiSystemPointerSize;
+  static const int kIsolateRootsOffset =
+      kCurrentMicrotaskNativeContextOffset + kApiSystemPointerSize;
 
 #if V8_TARGET_ARCH_PPC64
   static constexpr int kFrameCPSlotCount = 1;
@@ -1217,6 +1342,11 @@ class Internals {
     return representation == kExternalTwoByteRepresentationTag;
   }
 
+  V8_INLINE static bool IsExternalOneByteString(int instance_type) {
+    int representation = (instance_type & kStringRepresentationAndEncodingMask);
+    return representation == kExternalOneByteRepresentationTag;
+  }
+
   V8_INLINE static constexpr bool CanHaveInternalField(int instance_type) {
     static_assert(kJSObjectType + 1 == kFirstJSApiObjectType);
     static_assert(kJSObjectType < kLastJSApiObjectType);
@@ -1304,7 +1434,7 @@ class Internals {
   V8_INLINE static Address* GetExternalPointerTableBase(v8::Isolate* isolate) {
     Address addr = reinterpret_cast<Address>(isolate) +
                    kIsolateExternalPointerTableOffset +
-                   kExternalPointerTableBasePointerOffset;
+                   kExternalEntityTableBasePointerOffset;
     return *reinterpret_cast<Address**>(addr);
   }
 
@@ -1313,7 +1443,7 @@ class Internals {
     Address addr = reinterpret_cast<Address>(isolate) +
                    kIsolateSharedExternalPointerTableAddressOffset;
     addr = *reinterpret_cast<Address*>(addr);
-    addr += kExternalPointerTableBasePointerOffset;
+    addr += kExternalEntityTableBasePointerOffset;
     return *reinterpret_cast<Address**>(addr);
   }
 #endif

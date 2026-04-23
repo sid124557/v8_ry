@@ -27,17 +27,17 @@ not contain spaces.
 # See HELP below for additional documentation.
 
 from __future__ import print_function
+from enum import IntEnum
+from pathlib import Path
 import errno
 import os
 import platform
 import re
+import select
+import shutil
 import subprocess
 import sys
-import shutil
 import time
-
-from enum import IntEnum
-from pathlib import Path
 
 USE_PTY = "linux" in sys.platform
 if USE_PTY:
@@ -152,14 +152,37 @@ QUIET = sys.argv[0] == "quietgm"  # Overridden by "quiet" keyword.
 build_dir_prefix = os.getenv("V8_GM_BUILD_DIR_PREFIX")
 
 V8_DIR = Path(__file__).resolve().parent.parent.parent
-GCLIENT_FILE_PATH = V8_DIR.parent / ".gclient"
 RECLIENT_CERT_CACHE = V8_DIR / ".#gm_reclient_cert_cache"
 
 if (V8_DIR.parent / "chrome").exists():
   CHROMIUM_DIR = V8_DIR.parent
-  GCLIENT_FILE_PATH = CHROMIUM_DIR / ".gclient"
 else:
   CHROMIUM_DIR = None
+
+
+# Useful when working with multiple git worktrees.
+def find_gclient(start_dir):
+  curr = start_dir.resolve()
+  while curr != curr.parent:
+    if (curr / ".gclient").exists():
+      return curr / ".gclient"
+
+    git_file = curr / ".git"
+    if git_file.is_file():
+      try:
+        content = git_file.read_text().strip()
+        if content.startswith("gitdir:"):
+          gitdir = Path(content.split()[1]).resolve()
+          res = find_gclient(gitdir)
+          if res:
+            return res
+      except Exception:
+        pass
+    curr = curr.parent
+  return None
+
+
+GCLIENT_FILE_PATH = find_gclient(V8_DIR)
 
 out_dir_override = os.getenv("V8_GM_OUTDIR")
 if out_dir_override and Path(out_dir_override).is_dir:
@@ -183,10 +206,11 @@ class Reclient(IntEnum):
   CUSTOM = 2
 
 
-def get_v8_solution(solutions):
+def get_gclient_solution(solutions):
   for solution in solutions:
-    if (solution["name"] == "v8" or
-        solution["url"] == "https://chromium.googlesource.com/v8/v8.git"):
+    if (solution["name"] in ("v8", "src") or solution["url"]
+        in ("https://chromium.googlesource.com/v8/v8.git",
+            "https://chromium.googlesource.com/chromium/src.git")):
       return solution
   return None
 
@@ -194,7 +218,7 @@ def get_v8_solution(solutions):
 # Note: this function is reused by update-compile-commands.py. When renaming
 # this, please update that file too!
 def detect_reclient():
-  if not GCLIENT_FILE_PATH.exists():
+  if not GCLIENT_FILE_PATH or not GCLIENT_FILE_PATH.exists():
     return Reclient.NONE
   content = GCLIENT_FILE_PATH.read_text()
   try:
@@ -203,11 +227,11 @@ def detect_reclient():
   except SyntaxError as e:
     print("# Can't detect reclient due to .gclient syntax errors.")
     return Reclient.NONE
-  v8_solution = get_v8_solution(config_dict["solutions"])
-  if not v8_solution:
+  gclient_solution = get_gclient_solution(config_dict["solutions"])
+  if not gclient_solution:
     print("# Can't detect reclient due to missing v8 gclient solution.")
     return Reclient.NONE
-  custom_vars = v8_solution.get("custom_vars", {})
+  custom_vars = gclient_solution.get("custom_vars", {})
   if "rbe_instance" in custom_vars:
     return Reclient.CUSTOM
   if "download_remoteexec_cfg" in custom_vars:
@@ -318,10 +342,11 @@ def print_completions_and_exit():
   sys.exit(0)
 
 
-def _call(cmd, silent=False):
+def _call(cmd, silent=False, cwd=None):
   if not silent and not QUIET:
-    print(f"# {cmd}")
-  return subprocess.call(cmd, shell=True)
+    cwd_print = f"cd {cwd} && " if cwd else ""
+    print(f"# {cwd_print}{cmd}")
+  return subprocess.call(cmd, shell=True, cwd=cwd)
 
 
 # Quiet mode means: only print in case of error.
@@ -351,17 +376,26 @@ def _call_with_output(cmd):
   output = []
   try:
     while True:
-      try:
-        data = os.read(parent, 512).decode('utf-8')
-      except OSError as e:
-        if e.errno != errno.EIO: raise
-        break # EIO means EOF on some systems
-      else:
-        if not data: # EOF
-          break
-        print(data, end="")
-        sys.stdout.flush()
-        output.append(data)
+      # Use select with a timeout to read from the pty. This avoids a potential
+      # hang if the subprocess dies unexpectedly (e.g. OOM killer) without
+      # closing the pty, which would cause a blocking os.read to wait forever.
+      ready, _, _ = select.select([parent], [], [], 0.1)
+      if ready:
+        try:
+          data = os.read(parent, 512).decode('utf-8')
+        except OSError as e:
+          if e.errno != errno.EIO:
+            raise
+          break  # EIO means EOF on some systems
+        else:
+          if not data:  # EOF
+            break
+          print(data, end="")
+          sys.stdout.flush()
+          output.append(data)
+      elif p.poll() is not None:
+        # If the process has exited and no data is available, stop waiting.
+        break
   finally:
     os.close(parent)
     while p.poll() is None:
@@ -461,13 +495,24 @@ class RawConfig:
         printable_path = self.path
     else:
       printable_path = self.path
+
+    printable_path_gn = printable_path
+    change_cwd = None
+    if CHROMIUM_DIR:
+      change_cwd = CHROMIUM_DIR
+      try:
+        printable_path_gn = self.path.relative_to(CHROMIUM_DIR)
+      except ValueError:
+        pass
+
     build_ninja = self.path / "build.ninja"
+
     if not build_ninja.exists():
-      code = _call(f"gn gen {printable_path}")
+      code = _call(f"gn gen {printable_path_gn}", cwd=change_cwd)
       if code != 0:
         return code
     elif self.clean:
-      code = _call(f"gn clean {printable_path}")
+      code = _call(f"gn clean {printable_path_gn}", cwd=change_cwd)
       if code != 0:
         return code
     targets = " ".join(self.targets)
@@ -490,6 +535,8 @@ class RawConfig:
         match = csa_trap.search(output)
         extra_opt = match.group(1) if match else ""
         cmdline = re.compile("python3 ../../tools/run.py ./mksnapshot (.*)")
+        if CHROMIUM_DIR:
+          cmdline = re.compile("python3 ../../v8/tools/run.py ./mksnapshot (.*)")
         orig_cmdline = cmdline.search(output).group(1).strip()
         cmdline = (
             prepare_mksnapshot_cmdline(orig_cmdline, self.path) + extra_opt)
@@ -499,6 +546,8 @@ class RawConfig:
       elif "run.py ./torque" in output and not ": Torque Error: " in output:
         # Torque failed/crashed without printing an error message.
         cmdline = re.compile("python3 ../../tools/run.py ./torque (.*)")
+        if CHROMIUM_DIR:
+          cmdline = re.compile("python3 ../../v8/tools/run.py ./torque (.*)")
         orig_cmdline = cmdline.search(output).group(1).strip()
         cmdline = f"gdb --args "
         cmdline = prepare_torque_cmdline(orig_cmdline, self.path)

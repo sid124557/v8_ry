@@ -25,6 +25,7 @@
 #include "include/v8-metrics.h"
 #include "src/common/assert-scope.h"
 #include "src/execution/isolate.h"
+#include "src/objects/managed.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/baseline/liftoff-compiler.h"
 #include "src/wasm/compilation-environment-inl.h"
@@ -68,9 +69,8 @@ bool CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
     auto& func = module->functions[i];
     base::Vector<const uint8_t> func_code =
         wire_bytes_accessor.GetFunctionBytes(&func);
-    constexpr bool kIsShared = false;
     FunctionBody func_body(func.sig, func.code.offset(), func_code.begin(),
-                           func_code.end(), kIsShared);
+                           func_code.end(), SharedFlag::kNo);
     auto result = ExecuteLiftoffCompilation(
         &env, func_body,
         LiftoffOptions{.func_index = static_cast<int>(func.func_index),
@@ -647,6 +647,18 @@ static std::optional<ExecutionResult> ExecuteNonReferenceRun(
   int32_t result = testing::CallWasmFunctionForTesting(
       isolate, instance, "main", base::VectorOf(compiled_args), &exception);
 
+  if (exception) {
+    if (strcmp(exception.get(),
+               "RangeError: Maximum call stack size exceeded") == 0) {
+      // There was a stack overflow. The reference run didn't have one,
+      // otherwise we wouldn't have gotten here; but we have seen cases where
+      // TF stack frames are slightly larger and optimized code hence
+      // runs into a stack overflow where unoptimized code didn't.
+      // Just ignore this, it's not a bug.
+      return {};
+    }
+  }
+
   return {{instance, std::move(exception), result, false}};
 }
 
@@ -751,11 +763,11 @@ bool MemoriesMatch(Isolate* isolate, const WasmModule* module,
     Tagged<WasmMemoryObject> ref_memory =
         ref_instance_data->memory_object(memory_index);
 
-    auto buffer = memory->array_buffer();
-    auto ref_buffer = ref_memory->array_buffer();
+    Managed<BackingStore>::Ptr store = memory->backing_store();
+    Managed<BackingStore>::Ptr ref_store = ref_memory->backing_store();
 
-    size_t memory_size = buffer->byte_length();
-    size_t ref_memory_size = ref_buffer->byte_length();
+    size_t memory_size = store->byte_length();
+    size_t ref_memory_size = ref_store->byte_length();
 
     if (ref_memory_size != memory_size) {
       memory_mismatches++;
@@ -770,8 +782,8 @@ bool MemoriesMatch(Isolate* isolate, const WasmModule* module,
       continue;
     }
 
-    uint8_t* data = static_cast<uint8_t*>(buffer->backing_store());
-    uint8_t* ref_data = static_cast<uint8_t*>(ref_buffer->backing_store());
+    uint8_t* data = static_cast<uint8_t*>(store->buffer_start());
+    uint8_t* ref_data = static_cast<uint8_t*>(ref_store->buffer_start());
 
 #if V8_OS_LINUX || V8_OS_DARWIN
     const bool memory_equal = sparse_memory_equal(ref_data, data, memory_size);
@@ -922,7 +934,8 @@ int ExecuteAgainstReference(Isolate* isolate,
 ) {
   HandleScope handle_scope(isolate);
 
-  NativeModule* native_module = module_object->native_module();
+  Managed<wasm::NativeModule>::Ptr native_module =
+      module_object->native_module();
   const WasmModule* module = native_module->module();
   const base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
   int exported_main = FindExportedMainFunction(module, wire_bytes);
@@ -965,7 +978,7 @@ int ExecuteAgainstReference(Isolate* isolate,
       ExecuteNonReferenceRun(isolate, module, module_object, exported_main);
   if (!result_opt) {
     // The execution of non-reference run can fail if it runs OOM during
-    // instantiation.
+    // instantiation or overflows the stack.
     return -1;
   }
   const ExecutionResult& result = *result_opt;
@@ -1091,16 +1104,16 @@ int ExecuteAgainstReference(Isolate* isolate,
   if (should_trace_memory) {
     std::ostringstream ss;
     ss << "\nMemory trace.\n";
-    CompareAndPrintMemoryTraces(memory_trace, ref_memory_trace, native_module,
-                                ss);
+    CompareAndPrintMemoryTraces(memory_trace, ref_memory_trace,
+                                native_module.raw(), ss);
     base::OS::PrintError("%s", ss.str().c_str());
   }
 
   if (should_trace_globals) {
     std::ostringstream ss;
     ss << "\nGlobal trace.\n";
-    CompareAndPrintGlobalTraces(global_trace, ref_global_trace, native_module,
-                                ss);
+    CompareAndPrintGlobalTraces(global_trace, ref_global_trace,
+                                native_module.raw(), ss);
     base::OS::PrintError("%s", ss.str().c_str());
   }
 
@@ -1219,6 +1232,7 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
 #if V8_TARGET_ARCH_ARM64
       // Fuzz the Wasm SIMD optimizations in Turboshaft for aarch64.
       v8_flags.experimental_wasm_simd_opt = true;
+      v8_flags.experimental_wasm_deinterleave_loads = true;
 #endif  // V8_TARGET_ARCH_ARM64
 
       // Enforce implications from enabling features.

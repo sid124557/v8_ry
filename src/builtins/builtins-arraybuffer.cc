@@ -7,7 +7,6 @@
 #include "src/execution/protectors-inl.h"
 #include "src/execution/protectors.h"
 #include "src/handles/maybe-handles-inl.h"
-#include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/logging/counters.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/js-array-buffer-inl.h"
@@ -35,7 +34,7 @@ namespace internal {
   }
 
 // -----------------------------------------------------------------------------
-// ES#sec-arraybuffer-objects
+// https://tc39.es/ecma262/#sec-arraybuffer-objects
 
 namespace {
 
@@ -109,9 +108,7 @@ Tagged<Object> ConstructBuffer(Isolate* isolate,
   // JSArrayBuffer to avoid a complex dance during setup. We then always create
   // the AB before throwing a possible error as the creation is observable.
   const SharedFlag shared =
-      *target != target->native_context()->array_buffer_fun()
-          ? SharedFlag::kShared
-          : SharedFlag::kNotShared;
+      SharedFlag(*target != target->native_context()->array_buffer_fun());
   const ResizableFlag resizable = max_length.is_null()
                                       ? ResizableFlag::kNotResizable
                                       : ResizableFlag::kResizable;
@@ -135,7 +132,7 @@ Tagged<Object> ConstructBuffer(Isolate* isolate,
 
 }  // namespace
 
-// ES #sec-arraybuffer-constructor
+// https://tc39.es/ecma262/#sec-arraybuffer-constructor
 BUILTIN(ArrayBufferConstructor) {
   HandleScope scope(isolate);
   DirectHandle<JSFunction> target = args.target();
@@ -314,8 +311,7 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
   CHECK_SHARED(is_shared, new_array_buffer, kMethodName);
 
   if (to_immutable) {
-    new_array_buffer->set_is_immutable(true);
-    DCHECK(!new_array_buffer->was_detached());
+    new_array_buffer->MakeImmutable(isolate);
 
     // * If IsDetachedBuffer(O) is true, throw a TypeError exception.
     // * Let fromBuf be O.[[ArrayBufferData]].
@@ -429,13 +425,13 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
   return *new_;
 }
 
-// ES #sec-sharedarraybuffer.prototype.slice
+// https://tc39.es/ecma262/#sec-sharedarraybuffer.prototype.slice
 BUILTIN(SharedArrayBufferPrototypeSlice) {
   const char* const kMethodName = "SharedArrayBuffer.prototype.slice";
   return SliceHelper(args, isolate, kMethodName, true, false);
 }
 
-// ES #sec-arraybuffer.prototype.slice
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.slice
 // ArrayBuffer.prototype.slice ( start, end )
 BUILTIN(ArrayBufferPrototypeSlice) {
   const char* const kMethodName = "ArrayBuffer.prototype.slice";
@@ -535,9 +531,8 @@ static Tagged<Object> ResizeHelper(BuiltinArguments args, Isolate* isolate,
     CHECK(IsWasmMemoryObject(*memory));
     // WasmMemoryObject::Grow handles updating byte_length, as it's used by both
     // ArrayBuffer.prototype.resize and WebAssembly.Memory.prototype.grow.
-    uint32_t delta_pages =
-        static_cast<uint32_t>(new_byte_length - old_byte_length) /
-        wasm::kWasmPageSize;
+    uint32_t delta_pages = static_cast<uint32_t>(
+        (new_byte_length - old_byte_length) / wasm::kWasmPageSize);
     if (WasmMemoryObject::Grow(isolate, Cast<WasmMemoryObject>(memory),
                                delta_pages) == -1) {
       THROW_NEW_ERROR_RETURN_FAILURE(
@@ -569,6 +564,8 @@ static Tagged<Object> ResizeHelper(BuiltinArguments args, Isolate* isolate,
     // TypedsArrays in optimized code may go out of bounds. Trigger deopts
     // through the ArrayBufferDetaching protector.
     if (new_byte_length < array_buffer->byte_length()) {
+      // TODO(olivf, 467645277): Try to resize only the view and avoid firing
+      // the protector.
       if (Protectors::IsArrayBufferDetachingIntact(isolate)) {
         Protectors::InvalidateArrayBufferDetaching(isolate);
       }
@@ -605,7 +602,7 @@ static Tagged<Object> ResizeHelper(BuiltinArguments args, Isolate* isolate,
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-// ES #sec-get-sharedarraybuffer.prototype.bytelength
+// https://tc39.es/ecma262/#sec-get-sharedarraybuffer.prototype.bytelength
 // get SharedArrayBuffer.prototype.byteLength
 BUILTIN(SharedArrayBufferPrototypeGetByteLength) {
   const char* const kMethodName = "get SharedArrayBuffer.prototype.byteLength";
@@ -626,7 +623,7 @@ BUILTIN(SharedArrayBufferPrototypeGetByteLength) {
   return *isolate->factory()->NewNumberFromSize(byte_length);
 }
 
-// ES #sec-arraybuffer.prototype.resize
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.resize
 // ArrayBuffer.prototype.resize(new_size)
 BUILTIN(ArrayBufferPrototypeResize) {
   const char* const kMethodName = "ArrayBuffer.prototype.resize";
@@ -714,8 +711,8 @@ Tagged<Object> ArrayBufferTransfer(Isolate* isolate,
 
   // 8. If arrayBuffer.[[ArrayBufferDetachKey]] is not undefined, throw a
   //     TypeError exception.
-
-  if (!array_buffer->is_detachable()) {
+  if (!IsUndefined(array_buffer->DetachKey(isolate)) ||
+      !array_buffer->is_detachable()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate,
         NewTypeError(MessageTemplate::kDataCloneErrorNonDetachableArrayBuffer));
@@ -814,7 +811,7 @@ Tagged<Object> ArrayBufferTransfer(Isolate* isolate,
   }
 
   if (preserve_resizability == kToImmutable) {
-    result_buffer->set_is_immutable(true);
+    result_buffer->MakeImmutable(isolate);
   }
 
   // 16. Return newBuffer.
@@ -823,7 +820,7 @@ Tagged<Object> ArrayBufferTransfer(Isolate* isolate,
 
 }  // namespace
 
-// ES #sec-arraybuffer.prototype.transfer
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.transfer
 // ArrayBuffer.prototype.transfer([new_length])
 BUILTIN(ArrayBufferPrototypeTransfer) {
   const char kMethodName[] = "ArrayBuffer.prototype.transfer";
@@ -837,7 +834,7 @@ BUILTIN(ArrayBufferPrototypeTransfer) {
                              kPreserveResizability, kMethodName);
 }
 
-// ES #sec-arraybuffer.prototype.transferToFixedLength
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.transferToFixedLength
 // ArrayBuffer.prototype.transferToFixedLength([new_length])
 BUILTIN(ArrayBufferPrototypeTransferToFixedLength) {
   const char kMethodName[] = "ArrayBuffer.prototype.transferToFixedLength";
@@ -851,7 +848,7 @@ BUILTIN(ArrayBufferPrototypeTransferToFixedLength) {
                              kMethodName);
 }
 
-// ES #sec-sharedarraybuffer.prototype.grow
+// https://tc39.es/ecma262/#sec-sharedarraybuffer.prototype.grow
 // SharedArrayBuffer.prototype.grow(new_size)
 BUILTIN(SharedArrayBufferPrototypeGrow) {
   const char* const kMethodName = "SharedArrayBuffer.prototype.grow";
@@ -859,7 +856,7 @@ BUILTIN(SharedArrayBufferPrototypeGrow) {
   return ResizeHelper(args, isolate, kMethodName, kIsShared);
 }
 
-// ES #sec-arraybuffer.prototype.transferToImmutable
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.transferToImmutable
 BUILTIN(ArrayBufferPrototypeTransferToImmutable) {
   const char kMethodName[] = "ArrayBuffer.prototype.transferToImmutable";
   HandleScope scope(isolate);
@@ -872,7 +869,7 @@ BUILTIN(ArrayBufferPrototypeTransferToImmutable) {
                              kMethodName);
 }
 
-// ES #sec-arraybuffer.prototype.sliceToImmutable
+// https://tc39.es/ecma262/#sec-arraybuffer.prototype.sliceToImmutable
 BUILTIN(ArrayBufferPrototypeSliceToImmutable) {
   const char* const kMethodName = "ArrayBuffer.prototype.sliceToImmutable";
   return SliceHelper(args, isolate, kMethodName, false, true);

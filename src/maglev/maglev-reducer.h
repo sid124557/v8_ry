@@ -17,6 +17,8 @@
 #include "src/maglev/maglev-graph.h"
 #include "src/maglev/maglev-interpreter-frame-state.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/maglev/maglev-node-type.h"
+#include "src/maglev/maglev-tracer.h"
 #include "src/zone/zone-containers.h"
 
 namespace v8 {
@@ -219,6 +221,18 @@ concept ReducerBaseWithEffectTracking = requires(BaseT* b) {
   b->template MarkPossibleSideEffect<NodeT>(std::declval<NodeT*>());
 };
 
+template <typename BaseT>
+concept ReducerBaseCanBuildCall = requires(BaseT* b) {
+  b->TryReduceCallForConstant(std::declval<compiler::JSFunctionRef>(),
+                              std::declval<typename BaseT::CallArguments&>());
+  b->BuildGenericCall(std::declval<ValueNode*>(),
+                      std::declval<Call::TargetType>(),
+                      std::declval<typename BaseT::CallArguments&>());
+};
+
+template <typename BaseT>
+concept ReducerBaseHasTracing = requires(BaseT* b) { b->is_tracing(); };
+
 enum class UseReprHintRecording { kRecord, kDoNotRecord };
 
 class BasicBlockPosition {
@@ -269,11 +283,26 @@ class MaglevReducer {
     DCHECK(new_nodes_at_end_.empty());
   }
 
-  static enum CheckType GetCheckType(NodeType type) {
-    return NodeTypeIs(type, NodeType::kAnyHeapObject)
-               ? CheckType::kOmitHeapObjectCheck
-               : CheckType::kCheckHeapObject;
+  static enum CheckType GetCheckType(NodeType type, ValueNode* target) {
+    if (NodeTypeIs(type, NodeType::kAnyHeapObject)) {
+      if (target && target->Is<Phi>()) {
+        target->Cast<Phi>()->SetUseRequiresHeapObject();
+      }
+      return CheckType::kOmitHeapObjectCheck;
+    } else {
+      return CheckType::kCheckHeapObject;
+    }
   }
+
+  ReduceResult BuildCheckMaps(
+      ValueNode* object, base::Vector<const compiler::MapRef> maps,
+      std::optional<ValueNode*> map = std::nullopt,
+      bool has_deprecated_map_without_migration_target = false,
+      bool migration_done_outside = false);
+
+  ReduceResult BuildCheckValueByReference(ValueNode* context, ValueNode* node,
+                                          compiler::HeapObjectRef ref,
+                                          DeoptimizeReason reason);
 
   // Add a new node with a dynamic set of inputs which are initialized by the
   // `post_create_input_initializer` function before the node is added to the
@@ -324,7 +353,6 @@ class MaglevReducer {
   std::optional<int32_t> TryGetInt32Constant(ValueNode* value);
   std::optional<uint32_t> TryGetUint32Constant(ValueNode* value);
   std::optional<intptr_t> TryGetIntPtrConstant(ValueNode* value);
-  std::optional<ShiftedInt53> TryGetShiftedInt53Constant(ValueNode* value);
   std::optional<Float64> TryGetFloat64OrHoleyFloat64Constant(
       UseRepresentation use_repr, ValueNode* value,
       TaggedToFloat64ConversionType conversion_type);
@@ -339,11 +367,84 @@ class MaglevReducer {
   MaybeReduceResult TryFoldCheckMaps(ValueNode* object, ValueNode* object_map,
                                      const MapContainer& maps,
                                      KnownMapsMerger<MapContainer>& merger);
+  MaybeReduceResult TryFoldTestUndetectable(ValueNode* value);
+  template <bool flip>
+  MaybeReduceResult TryFoldToBoolean(ValueNode* value);
 
-  ReduceResult BuildSmiUntag(ValueNode* node);
+  enum InferHasInPrototypeChainResult {
+    kMayBeInPrototypeChain,
+    kIsInPrototypeChain,
+    kIsNotInPrototypeChain
+  };
+  InferHasInPrototypeChainResult InferHasInPrototypeChain(
+      ValueNode* receiver, compiler::HeapObjectRef prototype);
+  MaybeReduceResult TryBuildFastHasInPrototypeChain(
+      ValueNode* object, compiler::HeapObjectRef prototype);
+  MaybeReduceResult TryBuildFastOrdinaryHasInstance(
+      ValueNode* context, ValueNode* object, compiler::JSObjectRef callable,
+      ValueNode* callable_node_if_not_constant);
+  MaybeReduceResult TryBuildFastInstanceOf(ValueNode* context,
+                                           ValueNode* object,
+                                           compiler::JSObjectRef callable_ref,
+                                           ValueNode* callable_node);
+  MaybeReduceResult TryBuildFastInstanceOfWithFeedback(
+      ValueNode* context, ValueNode* object, ValueNode* callable,
+      compiler::FeedbackSource feedback_source);
+
+  ReduceResult BuildSmiUntag(
+      ValueNode* node, AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
+                           AllowWideningSmiToInt32::kDontAllow);
 
   ReduceResult BuildNumberOrOddballToFloat64OrHoleyFloat64(
       ValueNode* node, UseRepresentation use_rep, NodeType allowed_input_type);
+
+  ReduceResult BuildOrdinaryHasInstance(
+      ValueNode* context, ValueNode* object, compiler::JSObjectRef callable,
+      ValueNode* callable_node_if_not_constant);
+
+  template <bool flip = false>
+  ReduceResult BuildToBoolean(ValueNode* value);
+
+  template <Builtin kBuiltin>
+  void SetCallBuiltinFeedback(CallBuiltin* call_builtin,
+                              compiler::FeedbackSource const& feedback,
+                              CallBuiltin::FeedbackSlotType slot_type);
+
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(std::initializer_list<ValueNode*> inputs);
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(ValueNode* context,
+                                std::initializer_list<ValueNode*> inputs);
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(std::initializer_list<ValueNode*> inputs,
+                                compiler::FeedbackSource const& feedback,
+                                CallBuiltin::FeedbackSlotType slot_type);
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(ValueNode* context,
+                                std::initializer_list<ValueNode*> inputs,
+                                compiler::FeedbackSource const& feedback,
+                                CallBuiltin::FeedbackSlotType slot_type);
+
+  template <Builtin kBuiltin>
+  ReduceResult BuildCallBuiltinWithTaggedInputs(
+      std::initializer_list<ValueNode*> inputs);
+  template <Builtin kBuiltin>
+  ReduceResult BuildCallBuiltinWithTaggedInputs(
+      ValueNode* context, std::initializer_list<ValueNode*> inputs);
+  template <Builtin kBuiltin>
+  ReduceResult BuildCallBuiltinWithTaggedInputs(
+      std::initializer_list<ValueNode*> inputs,
+      compiler::FeedbackSource const& feedback,
+      CallBuiltin::FeedbackSlotType slot_type);
+  template <Builtin kBuiltin>
+  ReduceResult BuildCallBuiltinWithTaggedInputs(
+      ValueNode* context, std::initializer_list<ValueNode*> inputs,
+      compiler::FeedbackSource const& feedback,
+      CallBuiltin::FeedbackSlotType slot_type);
+
+  compiler::OptionalStringRef GetStringFromInt32(int32_t value);
+
+  MaybeReduceResult TryFoldNumberToString(ValueNode* value);
 
   // Get a tagged representation node whose value is equivalent to the given
   // node.
@@ -359,12 +460,6 @@ class MaglevReducer {
 
   // This does not emit any conversion.
   ValueNode* TryGetInt32(ValueNode* value);
-
-  // Get a ShiftInt53 representation node whose value is equivalent to the given
-  // node.
-  //
-  // Deopts if the value is not exactly representable as an Int32.
-  ValueNode* GetShiftedInt53(ValueNode* value);
 
   // Get an Int32 representation node whose value is equivalent to the ToInt32
   // truncation of the given node (including a ToNumber call). Only trivial
@@ -440,6 +535,20 @@ class MaglevReducer {
     return graph()->graph_labeller();
   }
 
+  maglev::Tracer tracer() const {
+    return maglev::Tracer(graph()->compilation_info());
+  }
+
+  // This indicates that the reducer base has tracing enabled.
+  bool is_tracing() const {
+    if constexpr (ReducerBaseHasTracing<BaseT>) {
+      return base_->is_tracing();
+    }
+    return false;
+  }
+
+  // This indicates it passes the function filter and this compilation _can_ be
+  // traced if some tracing flag is enabled.
   bool is_tracing_enabled() const { return graph()->is_tracing_enabled(); }
 
   // TODO(victorgomes): Delete these access (or move to private) when the
@@ -497,9 +606,6 @@ class MaglevReducer {
   }
   Int32Constant* GetInt32Constant(int32_t constant) {
     return graph()->GetInt32Constant(constant);
-  }
-  ShiftedInt53Constant* GetShiftedInt53Constant(ShiftedInt53 constant) {
-    return graph()->GetShiftedInt53Constant(constant);
   }
   IntPtrConstant* GetIntPtrConstant(intptr_t constant) {
     return graph()->GetIntPtrConstant(constant);
@@ -567,8 +673,6 @@ class MaglevReducer {
                                                      double cst_right);
   bool TryFoldFloat64CompareOperation(Operation op, double left, double right);
 
-  MaybeReduceResult TryFoldShiftedInt53Add(ValueNode* left, ValueNode* right);
-
   template <Operation kOperation>
   MaybeReduceResult TryFoldFloat64UnaryOperationForToNumber(
       TaggedToFloat64ConversionType conversion_type, ValueNode* value);
@@ -603,8 +707,26 @@ class MaglevReducer {
   bool EnsureType(ValueNode* node, NodeType type, NodeType* old = nullptr) {
     return known_node_aspects().EnsureType(broker(), node, type, old);
   }
-  NodeType GetType(ValueNode* node) {
-    return known_node_aspects().GetType(broker(), node);
+  NodeType GetType(ValueNode* node,
+                   AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
+                       AllowWideningSmiToInt32::kAllow) {
+    NodeType type = known_node_aspects().GetTypeUnchecked(broker(), node);
+    if (v8_flags.maglev_assert_types && type != NodeType::kUnknown)
+        [[unlikely]] {
+      if (type == NodeType::kNone) {
+        // We're generating code which should never be executed.
+        ReduceResult result = AddNewNode<Trap>({});
+        CHECK(result.IsDoneWithPayload());
+      } else {
+        // TODO(marja): Consider adding different CheckMaglevType variants
+        // based on node->value_representation(). Then we wouldn't need to
+        // convert the value to tagged.
+        ReduceResult result = AddNewNode<CheckMaglevType>(
+            {node}, type, allow_widening_smi_to_int32);
+        CHECK(result.IsDoneWithPayload());
+      }
+    }
+    return type;
   }
   NodeInfo* GetOrCreateInfoFor(ValueNode* node) {
     return known_node_aspects().GetOrCreateInfoFor(broker(), node);
@@ -612,11 +734,17 @@ class MaglevReducer {
   // Returns true if we statically know that {lhs} and {rhs} have disjoint
   // types.
   bool HaveDisjointTypes(ValueNode* lhs, ValueNode* rhs) {
-    return known_node_aspects().HaveDisjointTypes(broker(), lhs, rhs);
+    NodeType rhs_type = GetType(rhs);
+    return HasDisjointType(lhs, rhs_type);
   }
+
   bool HasDisjointType(ValueNode* lhs, NodeType rhs_type) {
-    return known_node_aspects().HasDisjointType(broker(), lhs, rhs_type);
+    NodeType lhs_type = GetType(lhs);
+    return IsEmptyNodeType(IntersectType(lhs_type, rhs_type));
   }
+
+  void SetKnownValue(ValueNode* node, compiler::ObjectRef constant,
+                     NodeType new_node_type);
 
   Zone* zone() const { return zone_; }
   Graph* graph() const { return graph_; }
@@ -676,6 +804,9 @@ class MaglevReducer {
     static_assert(ReducerBaseWithKNA<BaseT>);
     return base_->known_node_aspects();
   }
+
+  template <typename T>
+  friend class MapInference;
 
  private:
   BaseT* base_;

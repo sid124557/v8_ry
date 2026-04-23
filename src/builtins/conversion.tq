@@ -40,7 +40,7 @@ transitioning builtin ToNumeric(implicit context: Context)(
   }
 }
 
-// ES section #sec-tostring-applied-to-the-number-type
+// https://tc39.es/ecma262/#sec-tostring-applied-to-the-number-type
 builtin NumberToString(input: Number): String {
   return ::NumberToString(input);
 }
@@ -83,7 +83,7 @@ struct ToBooleanForBaselineJumpResult {
 builtin ToBooleanForBaselineJump(input: JSAny):
     ToBooleanForBaselineJumpResult {
   try {
-    BranchIfToBooleanIsTrue(input) otherwise IsTrue, IsFalse;
+    BranchIfToBooleanIsTrue(input, V8_STATIC_ROOTS) otherwise IsTrue, IsFalse;
   } label IsTrue {
     return ToBooleanForBaselineJumpResult{value: input, is_to_boolean: 1};
   } label IsFalse {

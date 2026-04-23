@@ -9,8 +9,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 #include "include/v8-extension.h"
@@ -46,6 +44,10 @@
 #include "src/parsing/parse-info.h"
 #include "src/parsing/token.h"
 #include "src/utils/ostreams.h"
+
+#ifdef DEBUG
+#include "absl/container/flat_hash_map.h"
+#endif
 
 namespace v8 {
 namespace internal {
@@ -979,14 +981,14 @@ class BytecodeGenerator::TopLevelDeclarationsBuilder final : public ZoneObject {
     Handle<FixedArray> data =
         isolate->factory()->NewFixedArray(entry_slots_, AllocationType::kOld);
 
-    int array_index = 0;
+    uint32_t array_index = 0;
     if (info->scope()->is_module_scope()) {
       for (Declaration* decl : *info->scope()->declarations()) {
         Variable* var = decl->var();
         if (!var->is_used()) continue;
         if (var->location() != VariableLocation::MODULE) continue;
 #ifdef DEBUG
-        int start = array_index;
+        uint32_t start = array_index;
 #endif
         if (decl->IsFunctionDeclaration()) {
           FunctionLiteral* f = static_cast<FunctionDeclaration*>(decl)->fun();
@@ -1012,7 +1014,7 @@ class BytecodeGenerator::TopLevelDeclarationsBuilder final : public ZoneObject {
         if (!var->is_used()) continue;
         if (var->location() != VariableLocation::UNALLOCATED) continue;
 #ifdef DEBUG
-        int start = array_index;
+        uint32_t start = array_index;
 #endif
         if (decl->IsVariableDeclaration()) {
           data->set(array_index++, *var->raw_name()->string());
@@ -1031,7 +1033,7 @@ class BytecodeGenerator::TopLevelDeclarationsBuilder final : public ZoneObject {
         }
       }
     }
-    DCHECK_EQ(array_index, data->length());
+    DCHECK_EQ(array_index, data->ulength().value());
     return data;
   }
 
@@ -2228,11 +2230,12 @@ void BytecodeGenerator::VisitModuleNamespaceImports() {
   SourceTextModuleDescriptor* descriptor =
       closure_scope()->AsModuleScope()->module();
   for (auto entry : descriptor->namespace_imports()) {
+    Variable* var = closure_scope()->LookupInModule(entry.first);
+    if (!var->is_used()) continue;
     builder()
-        ->LoadLiteral(Smi::FromInt(entry->module_request))
+        ->LoadLiteral(Smi::FromInt(entry.second->module_request))
         .StoreAccumulatorInRegister(module_request)
         .CallRuntime(Runtime::kGetModuleNamespace, module_request);
-    Variable* var = closure_scope()->LookupInModule(entry->local_name);
     BuildVariableAssignment(var, Token::kInit, HoleCheckMode::kElided);
   }
 }
@@ -2450,6 +2453,9 @@ void BytecodeGenerator::VisitConsecutivePrototypeAssignments(
 
 void BytecodeGenerator::VisitStatements(
     const ZonePtrList<Statement>* statements, int start) {
+
+  if (builder()->RemainderOfBlockIsDead()) return;
+
   for (int stmt_idx = start; stmt_idx < statements->length(); stmt_idx++) {
     if (v8_flags.proto_assign_seq_opt) {
       int proto_assign_idx = stmt_idx;
@@ -2575,29 +2581,17 @@ void BytecodeGenerator::VisitWithStatement(WithStatement* stmt) {
 
 namespace {
 
-bool IsSmiLiteralSwitchCaseValue(Expression* expr) {
-  if (expr->IsSmiLiteral() ||
-      (expr->IsLiteral() && expr->AsLiteral()->IsNumber() &&
-       expr->AsLiteral()->AsNumber() == 0.0)) {
-    return true;
-#ifdef DEBUG
-  } else if (expr->IsLiteral() && expr->AsLiteral()->IsNumber()) {
-    DCHECK(!IsSmiDouble(expr->AsLiteral()->AsNumber()));
-#endif
-  }
-  return false;
-}
-
-// Precondition: we called IsSmiLiteral to check this.
-inline int ReduceToSmiSwitchCaseValue(Expression* expr) {
-  if (V8_LIKELY(expr->IsSmiLiteral())) {
+inline std::optional<int> TryReduceToSmiSwitchCaseValue(Expression* expr) {
+  if (expr->IsSmiLiteral()) {
     return expr->AsLiteral()->AsSmiLiteral().value();
-  } else {
-    // Only the zero case is possible otherwise.
-    DCHECK(expr->IsLiteral() && expr->AsLiteral()->IsNumber() &&
-           expr->AsLiteral()->AsNumber() == -0.0);
+  }
+  if (expr->IsLiteral() && expr->AsLiteral()->IsNumber() &&
+      expr->AsLiteral()->AsNumber() == 0.0) {
     return 0;
   }
+  DCHECK_IMPLIES(expr->IsLiteral() && expr->AsLiteral()->IsNumber(),
+                 !IsSmiDouble(expr->AsLiteral()->AsNumber()));
+  return {};
 }
 
 // Is the range of Smi's small enough relative to number of cases?
@@ -2614,28 +2608,35 @@ struct SwitchInfo {
   SwitchInfo() { default_case = kDefaultNotFound; }
 
   bool DefaultExists() { return default_case != kDefaultNotFound; }
-  bool CaseExists(int j) {
+  bool CaseExists(int j) const {
     return covered_cases.find(j) != covered_cases.end();
   }
-  bool CaseExists(Expression* expr) {
-    return IsSmiLiteralSwitchCaseValue(expr)
-               ? CaseExists(ReduceToSmiSwitchCaseValue(expr))
-               : false;
+  bool CaseExists(Expression* expr) const {
+    std::optional<int> j = TryReduceToSmiSwitchCaseValue(expr);
+    if (!j) return false;
+    return CaseExists(*j);
   }
-  CaseClause* GetClause(int j) { return covered_cases[j]; }
 
-  bool IsDuplicate(CaseClause* clause) {
-    return IsSmiLiteralSwitchCaseValue(clause->label()) &&
-           CaseExists(clause->label()) &&
-           clause != GetClause(ReduceToSmiSwitchCaseValue(clause->label()));
+  // Returns true if this clause represents a case value, but there already
+  // exists another clause with the same case value.
+  bool IsDuplicate(CaseClause* clause) const {
+    std::optional<int> j = TryReduceToSmiSwitchCaseValue(clause->label());
+    if (!j) return false;
+    auto it = covered_cases.find(*j);
+    if (it == covered_cases.end()) return false;
+    return it->second != clause;
   }
-  int MinCase() {
-    return covered_cases.empty() ? INT_MAX : covered_cases.begin()->first;
+
+  int MinCase() const {
+    DCHECK(!covered_cases.empty());
+    return covered_cases.begin()->first;
   }
-  int MaxCase() {
-    return covered_cases.empty() ? INT_MIN : covered_cases.rbegin()->first;
+  int MaxCase() const {
+    DCHECK(!covered_cases.empty());
+    return covered_cases.rbegin()->first;
   }
-  void Print() {
+
+  void Print() const {
     std::cout << "Covered_cases: " << '\n';
     for (auto iter = covered_cases.begin(); iter != covered_cases.end();
          ++iter) {
@@ -2657,11 +2658,14 @@ bool IsSwitchOptimizable(SwitchStatement* stmt, SwitchInfo* info) {
       // Don't consider Smi cases after a non-literal, because we
       // need to evaluate the non-literal.
       break;
-    } else if (IsSmiLiteralSwitchCaseValue(clause->label())) {
-      int value = ReduceToSmiSwitchCaseValue(clause->label());
-      info->covered_cases.insert({value, clause});
+    } else if (auto maybe_value =
+                   TryReduceToSmiSwitchCaseValue(clause->label())) {
+      info->covered_cases.insert({*maybe_value, clause});
     }
   }
+
+  // This flag is not allowed to be <= 0.
+  DCHECK_GT(v8_flags.switch_table_min_cases, 0);
 
   // GCC also jump-table optimizes switch statements with 6 cases or more.
   if (static_cast<int>(info->covered_cases.size()) >=
@@ -2806,18 +2810,14 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
 
     builder()->LoadLiteral(Smi::kMinValue);
     builder()->StoreAccumulatorInRegister(r2);
-    builder()->CompareOperation(
-        Token::kGreaterThanEq, r1,
-        feedback_index(feedback_spec()->AddCompareICSlot()));
+    builder()->CompareOperation(Token::kGreaterThanEq, r1, kFeedbackIsEmbedded);
 
     switch_builder.JumpToFallThroughIfFalse();
     builder()->LoadAccumulatorWithRegister(r1);
 
     builder()->LoadLiteral(Smi::kMaxValue);
     builder()->StoreAccumulatorInRegister(r2);
-    builder()->CompareOperation(
-        Token::kLessThanEq, r1,
-        feedback_index(feedback_spec()->AddCompareICSlot()));
+    builder()->CompareOperation(Token::kLessThanEq, r1, kFeedbackIsEmbedded);
 
     switch_builder.JumpToFallThroughIfFalse();
     builder()->LoadAccumulatorWithRegister(r1);
@@ -2846,7 +2846,7 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
 
   int case_compare_ctr = 0;
 #ifdef DEBUG
-  std::unordered_map<int, int> case_ctr_checker;
+  absl::flat_hash_map<int, int> case_ctr_checker;
 #endif
 
   if (use_jumps) {
@@ -2908,7 +2908,7 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
         } else {
           // Use jump table if this is not a duplicate label.
           switch_builder.BindCaseTargetForJumpTable(
-              ReduceToSmiSwitchCaseValue(clause->label()), clause);
+              *TryReduceToSmiSwitchCaseValue(clause->label()), clause);
         }
       }
     } else {
@@ -3489,7 +3489,7 @@ void BytecodeGenerator::VisitDebuggerStatement(DebuggerStatement* stmt) {
 void BytecodeGenerator::VisitFunctionLiteral(FunctionLiteral* expr) {
   CHECK_LT(info_->literal()->function_literal_id(),
            expr->function_literal_id());
-  DCHECK_EQ(expr->scope()->outer_scope(), current_scope());
+  CHECK_EQ(expr->scope()->outer_scope(), current_scope());
   uint8_t flags = CreateClosureFlags::Encode(
       expr->pretenure(), closure_scope()->is_function_scope());
   size_t entry = builder()->AllocateDeferredConstantPoolEntry();
@@ -4753,21 +4753,17 @@ void BytecodeGenerator::BuildVariableLoad(Variable* variable,
         context_reg = execution_context()->reg();
       }
 
-      BytecodeArrayBuilder::ContextSlotMutability immutable =
-          (variable->maybe_assigned() == kNotAssigned)
-              ? BytecodeArrayBuilder::kImmutableSlot
-              : BytecodeArrayBuilder::kMutableSlot;
+      bool is_immutable = variable->maybe_assigned() == kNotAssigned;
       Register acc = Register::virtual_accumulator();
-      if (immutable == BytecodeArrayBuilder::kImmutableSlot &&
-          IsVariableInRegister(variable, acc)) {
+      if (is_immutable && IsVariableInRegister(variable, acc)) {
         return;
       }
 
-      builder()->LoadContextSlot(context_reg, variable, depth, immutable);
+      builder()->LoadContextSlot(context_reg, variable, depth);
       if (VariableNeedsHoleCheckInCurrentBlock(variable, hole_check_mode)) {
         BuildThrowIfHole(variable);
       }
-      if (immutable == BytecodeArrayBuilder::kImmutableSlot) {
+      if (is_immutable) {
         SetVariableInRegister(variable, acc);
       }
       break;
@@ -5036,8 +5032,7 @@ void BytecodeGenerator::BuildVariableAssignment(
         Register value_temp = register_allocator()->NewRegister();
         builder()
             ->StoreAccumulatorInRegister(value_temp)
-            .LoadContextSlot(context_reg, variable, depth,
-                             BytecodeArrayBuilder::kMutableSlot);
+            .LoadContextSlot(context_reg, variable, depth);
 
         BuildHoleCheckForVariableAssignment(variable, op);
         builder()->LoadAccumulatorWithRegister(value_temp);
@@ -5056,7 +5051,13 @@ void BytecodeGenerator::BuildVariableAssignment(
         }
         builder()->StoreContextSlot(context_reg, variable, depth);
       } else if (variable->throw_on_const_assignment(language_mode())) {
-        builder()->CallRuntime(Runtime::kThrowConstAssignError);
+        if (mode == VariableMode::kUsing) {
+          builder()->CallRuntime(Runtime::kThrowUsingAssignError);
+        } else if (mode == VariableMode::kAwaitUsing) {
+          builder()->CallRuntime(Runtime::kThrowAwaitUsingAssignError);
+        } else {
+          builder()->CallRuntime(Runtime::kThrowConstAssignError);
+        }
       }
       break;
     }
@@ -5068,8 +5069,14 @@ void BytecodeGenerator::BuildVariableAssignment(
     case VariableLocation::MODULE: {
       DCHECK(IsDeclaredVariableMode(mode));
 
-      if (mode == VariableMode::kConst && op != Token::kInit) {
-        builder()->CallRuntime(Runtime::kThrowConstAssignError);
+      if (IsImmutableLexicalVariableMode(mode) && op != Token::kInit) {
+        if (mode == VariableMode::kUsing) {
+          builder()->CallRuntime(Runtime::kThrowUsingAssignError);
+        } else if (mode == VariableMode::kAwaitUsing) {
+          builder()->CallRuntime(Runtime::kThrowAwaitUsingAssignError);
+        } else {
+          builder()->CallRuntime(Runtime::kThrowConstAssignError);
+        }
         break;
       }
 
@@ -5233,6 +5240,14 @@ BytecodeGenerator::AssignmentLhsData::KeyedSuperProperty(
   return AssignmentLhsData(KEYED_SUPER_PROPERTY, nullptr, super_property_args,
                            Register(), Register(), nullptr, nullptr);
 }
+// static
+BytecodeGenerator::AssignmentLhsData
+BytecodeGenerator::AssignmentLhsData::PrivateField(
+    Register object, int slot_index, int depth) {  // Changed from AstRawString*
+  return AssignmentLhsData(KEYED_PROPERTY, nullptr, RegisterList(), object,
+                           Register(), nullptr, nullptr, true, slot_index,
+                           depth);
+}
 
 BytecodeGenerator::AssignmentLhsData BytecodeGenerator::PrepareAssignmentLhs(
     Expression* lhs, AccumulatorPreservingMode accumulator_preserving_mode) {
@@ -5254,6 +5269,12 @@ BytecodeGenerator::AssignmentLhsData BytecodeGenerator::PrepareAssignmentLhs(
     case KEYED_PROPERTY: {
       AccumulatorPreservingScope scope(this, accumulator_preserving_mode);
       Register object = VisitForRegisterValue(property->obj());
+
+      if (v8_flags.private_field_bytecodes && property->IsPrivateReference()) {
+        Variable* var = property->key()->AsVariableProxy()->var();
+        int depth = execution_context()->ContextChainDepth(var->scope());
+        return AssignmentLhsData::PrivateField(object, var->index(), depth);
+      }
       Register key = VisitForRegisterValue(property->key());
       return AssignmentLhsData::KeyedProperty(object, key);
     }
@@ -5806,8 +5827,22 @@ void BytecodeGenerator::BuildAssignment(
         value = register_allocator()->NewRegister();
         builder()->StoreAccumulatorInRegister(value);
       }
-      builder()->SetKeyedProperty(lhs_data.object(), lhs_data.key(),
-                                  feedback_index(slot), language_mode());
+      if (v8_flags.private_field_bytecodes && lhs_data.is_private_field()) {
+        int depth = lhs_data.depth();
+        ContextScope* context = execution_context()->Previous(depth);
+        Register context_reg;
+        if (context) {
+          context_reg = context->reg();
+          depth = 0;
+        } else {
+          context_reg = execution_context()->reg();
+        }
+        builder()->SetPrivateField(context_reg, lhs_data.slot_index(), depth,
+                                   lhs_data.object(), feedback_index(slot));
+      } else {
+        builder()->SetKeyedProperty(lhs_data.object(), lhs_data.key(),
+                                    feedback_index(slot), language_mode());
+      }
       if (!execution_result()->IsEffect()) {
         builder()->LoadAccumulatorWithRegister(value);
       }
@@ -5892,6 +5927,20 @@ void BytecodeGenerator::VisitCompoundAssignment(CompoundAssignment* expr) {
     }
     case KEYED_PROPERTY: {
       FeedbackSlot slot = feedback_spec()->AddKeyedLoadICSlot();
+      if (v8_flags.private_field_bytecodes && lhs_data.is_private_field()) {
+        int depth = lhs_data.depth();
+        ContextScope* context = execution_context()->Previous(depth);
+        Register context_reg;
+        if (context) {
+          context_reg = context->reg();
+          depth = 0;
+        } else {
+          context_reg = execution_context()->reg();
+        }
+        builder()->GetPrivateField(context_reg, lhs_data.slot_index(), depth,
+                                   lhs_data.object(), feedback_index(slot));
+        break;
+      }
       builder()->LoadAccumulatorWithRegister(lhs_data.key());
       BuildLoadKeyedProperty(lhs_data.object(), slot);
       break;
@@ -6424,6 +6473,24 @@ void BytecodeGenerator::VisitPropertyLoad(Register obj, Property* property) {
       break;
     }
     case KEYED_PROPERTY: {
+      if (v8_flags.private_field_bytecodes && property->IsPrivateReference()) {
+        builder()->SetExpressionPosition(property);
+        DCHECK(property->key()->IsVariableProxy());
+        Variable* var = property->key()->AsVariableProxy()->var();
+        int depth = execution_context()->ContextChainDepth(var->scope());
+        ContextScope* context = execution_context()->Previous(depth);
+        Register context_reg;
+        if (context) {
+          context_reg = context->reg();
+          depth = 0;
+        } else {
+          context_reg = execution_context()->reg();
+        }
+        builder()->GetPrivateField(
+            context_reg, var->index(), depth, obj,
+            feedback_index(feedback_spec()->AddKeyedLoadICSlot()));
+        break;
+      }
       VisitForAccumulatorValueAsPropertyKey(property->key());
       builder()->SetExpressionPosition(property);
       BuildLoadKeyedProperty(obj, feedback_spec()->AddKeyedLoadICSlot());
@@ -6753,7 +6820,15 @@ void BytecodeGenerator::VisitCall(Call* expr) {
   //     callee(1, ...x, 2)
   // to
   //     %reflect_apply(callee, receiver, [1, ...x, 2])
+  //
+  // For direct eval calls with a final spread like eval(...iter), we also use
+  // %reflect_apply so we can extract the first argument for eval resolution.
   const Call::SpreadPosition spread_position = expr->spread_position();
+  const bool eval_with_final_spread =
+      spread_position == Call::kHasFinalSpread && expr->is_possibly_eval() &&
+      expr->arguments()->length() > 0;
+  const bool use_reflect_apply =
+      spread_position == Call::kHasNonFinalSpread || eval_with_final_spread;
 
   // Grow the args list as we visit receiver / arguments to avoid allocating all
   // the registers up-front. Otherwise these registers are unavailable during
@@ -6871,7 +6946,7 @@ void BytecodeGenerator::VisitCall(Call* expr) {
   }
 
   int receiver_arg_count = -1;
-  if (spread_position == Call::kHasNonFinalSpread) {
+  if (use_reflect_apply) {
     // If we're building %reflect_apply, build the array literal and put it in
     // the 3rd argument.
     DCHECK(!implicit_undefined_receiver);
@@ -6900,7 +6975,7 @@ void BytecodeGenerator::VisitCall(Call* expr) {
     // position.
 
     // Move the first arg.
-    if (spread_position == Call::kHasNonFinalSpread) {
+    if (use_reflect_apply) {
       int feedback_slot_index =
           feedback_index(feedback_spec()->AddKeyedLoadICSlot());
       Register args_array = args[2];
@@ -6909,7 +6984,6 @@ void BytecodeGenerator::VisitCall(Call* expr) {
           .LoadKeyedProperty(args_array, feedback_slot_index)
           .StoreAccumulatorInRegister(runtime_call_args[1]);
     } else {
-      // FIXME(v8:5690): Support final spreads for eval.
       DCHECK_GE(receiver_arg_count, 0);
       builder()->MoveRegister(args[receiver_arg_count], runtime_call_args[1]);
     }
@@ -6938,12 +7012,12 @@ void BytecodeGenerator::VisitCall(Call* expr) {
 
   builder()->SetExpressionPosition(expr);
 
-  if (spread_position == Call::kHasFinalSpread) {
+  if (use_reflect_apply) {
+    builder()->CallJSRuntime(Context::REFLECT_APPLY_INDEX, args);
+  } else if (spread_position == Call::kHasFinalSpread) {
     DCHECK(!implicit_undefined_receiver);
     builder()->CallWithSpread(callee, args,
                               feedback_index(feedback_spec()->AddCallICSlot()));
-  } else if (spread_position == Call::kHasNonFinalSpread) {
-    builder()->CallJSRuntime(Context::REFLECT_APPLY_INDEX, args);
   } else if (call_type == Call::NAMED_PROPERTY_CALL ||
              call_type == Call::KEYED_PROPERTY_CALL) {
     DCHECK(!implicit_undefined_receiver);
@@ -7417,6 +7491,22 @@ void BytecodeGenerator::VisitCountOperation(CountOperation* expr) {
     }
     case KEYED_PROPERTY: {
       object = VisitForRegisterValue(property->obj());
+      if (v8_flags.private_field_bytecodes && property->IsPrivateReference()) {
+        Variable* var = property->key()->AsVariableProxy()->var();
+        int depth = execution_context()->ContextChainDepth(var->scope());
+        ContextScope* context = execution_context()->Previous(depth);
+        Register context_reg;
+        if (context) {
+          context_reg = context->reg();
+          depth = 0;
+        } else {
+          context_reg = execution_context()->reg();
+        }
+        builder()->GetPrivateField(
+            context_reg, var->index(), depth, object,
+            feedback_index(feedback_spec()->AddKeyedLoadICSlot()));
+        break;
+      }
       // Use visit for accumulator here since we need the key in the accumulator
       // for the LoadKeyedProperty.
       key = register_allocator()->NewRegister();
@@ -7533,8 +7623,24 @@ void BytecodeGenerator::VisitCountOperation(CountOperation* expr) {
         value = register_allocator()->NewRegister();
         builder()->StoreAccumulatorInRegister(value);
       }
-      builder()->SetKeyedProperty(object, key, feedback_index(slot),
-                                  language_mode());
+      if (v8_flags.private_field_bytecodes && property->IsPrivateReference()) {
+        Variable* var = property->key()->AsVariableProxy()->var();
+        int depth = execution_context()->ContextChainDepth(var->scope());
+        ContextScope* context = execution_context()->Previous(depth);
+        Register context_reg;
+        if (context) {
+          context_reg = context->reg();
+          depth = 0;
+        } else {
+          context_reg = execution_context()->reg();
+        }
+        builder()->SetPrivateField(context_reg, var->index(), depth, object,
+                                   feedback_index(slot));
+        break;
+      } else {
+        builder()->SetKeyedProperty(object, key, feedback_index(slot),
+                                    language_mode());
+      }
       if (!execution_result()->IsEffect()) {
         builder()->LoadAccumulatorWithRegister(value);
       }
@@ -7671,13 +7777,23 @@ static bool IsCharU(const AstRawString* str) {
 static bool IsLiteralCompareTypeof(CompareOperation* expr,
                                    Expression** sub_expr,
                                    TestTypeOfFlags::LiteralFlag* flag,
+                                   bool* negate,
                                    const AstStringConstants* ast_constants) {
+  // Note: The parser normalizes `typeof x !== 'string'` to
+  // `!(typeof x === 'string')` at the AST level, so we only see Eq/EqStrict
+  // here, never NotEq/NotEqStrict. The wrapping Not is handled by VisitNot,
+  // which applies InvertControlFlow in test context.
+  // See ParseBinaryContinuation in parser-base.h.
+  DCHECK_NE(expr->op(), Token::kNotEq);
+  DCHECK_NE(expr->op(), Token::kNotEqStrict);
+
   if (IsTypeof(expr->left()) && expr->right()->IsStringLiteral()) {
     Literal* right_lit = expr->right()->AsLiteral();
 
     if (Token::IsEqualityOp(expr->op())) {
       // typeof(x) === 'string'
       *flag = TestTypeOfFlags::GetFlagForLiteral(ast_constants, right_lit);
+      *negate = false;
     } else if (expr->op() == Token::kGreaterThan &&
                IsCharU(right_lit->AsRawString())) {
       // typeof(x) > 'u'
@@ -7685,6 +7801,14 @@ static bool IsLiteralCompareTypeof(CompareOperation* expr,
       // since `undefined` is the only valid value that is greater than 'u'.
       // Check the test OnlyUndefinedGreaterThanU in bytecodes-unittest.cc
       *flag = TestTypeOfFlags::LiteralFlag::kUndefined;
+      *negate = false;
+    } else if (expr->op() == Token::kLessThan &&
+               IsCharU(right_lit->AsRawString())) {
+      // typeof(x) < 'u'
+      // Minifier may convert `typeof(x) !== 'undefined'` to this form,
+      // since `undefined` is the only valid value that is greater than 'u'.
+      *flag = TestTypeOfFlags::LiteralFlag::kUndefined;
+      *negate = true;
     } else {
       return false;
     }
@@ -7699,10 +7823,17 @@ static bool IsLiteralCompareTypeof(CompareOperation* expr,
     if (Token::IsEqualityOp(expr->op())) {
       // 'string' === typeof(x)
       *flag = TestTypeOfFlags::GetFlagForLiteral(ast_constants, left_lit);
+      *negate = false;
     } else if (expr->op() == Token::kLessThan &&
                IsCharU(left_lit->AsRawString())) {
       // 'u' < typeof(x)
       *flag = TestTypeOfFlags::LiteralFlag::kUndefined;
+      *negate = false;
+    } else if (expr->op() == Token::kGreaterThan &&
+               IsCharU(left_lit->AsRawString())) {
+      // 'u' > typeof(x)
+      *flag = TestTypeOfFlags::LiteralFlag::kUndefined;
+      *negate = true;
     } else {
       return false;
     }
@@ -7718,15 +7849,25 @@ void BytecodeGenerator::VisitCompareOperation(CompareOperation* expr) {
   Expression* sub_expr;
   Literal* literal;
   TestTypeOfFlags::LiteralFlag flag;
-  if (IsLiteralCompareTypeof(expr, &sub_expr, &flag, ast_string_constants())) {
+  bool negate;
+  if (IsLiteralCompareTypeof(expr, &sub_expr, &flag, &negate,
+                             ast_string_constants())) {
     // Emit a fast literal comparison for expressions of the form:
     // typeof(x) === 'string'.
     VisitForTypeOfValue(sub_expr);
     builder()->SetExpressionPosition(expr);
     if (flag == TestTypeOfFlags::LiteralFlag::kOther) {
+      DCHECK(!negate);
       builder()->LoadFalse();
     } else {
       builder()->CompareTypeOf(flag);
+      if (negate) {
+        if (execution_result()->IsTest()) {
+          execution_result()->AsTest()->InvertControlFlow();
+        } else {
+          builder()->LogicalNot(ToBooleanMode::kAlreadyBoolean);
+        }
+      }
     }
   } else if (expr->IsLiteralStrictCompareBoolean(&sub_expr, &literal)) {
     DCHECK(expr->op() == Token::kEqStrict);
@@ -7764,10 +7905,9 @@ void BytecodeGenerator::VisitCompareOperation(CompareOperation* expr) {
       slot = feedback_spec()->AddKeyedHasICSlot();
     } else if (expr->op() == Token::kInstanceOf) {
       slot = feedback_spec()->AddInstanceOfSlot();
-    } else if (expr->op() == Token::kEqStrict) {
-    } else {
-      slot = feedback_spec()->AddCompareICSlot();
     }
+    // feedback is embedded for other compare operations
+
     builder()->CompareOperation(
         expr->op(), lhs,
         slot.IsInvalid() ? kFeedbackIsEmbedded : feedback_index(slot));
@@ -8470,7 +8610,7 @@ void BytecodeGenerator::VisitNaryNullishExpression(NaryOperation* expr) {
 void BytecodeGenerator::BuildNewLocalActivationContext() {
   ValueResultScope value_execution_result(this);
   Scope* scope = closure_scope();
-  DCHECK_EQ(current_scope(), closure_scope());
+  CHECK_EQ(current_scope(), closure_scope());
 
   // Create the appropriate context.
   DCHECK(scope->is_function_scope() || scope->is_eval_scope());

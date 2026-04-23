@@ -220,7 +220,7 @@ CpuFeatureScope::~CpuFeatureScope() {
 bool CpuFeatures::initialized_ = false;
 bool CpuFeatures::supports_wasm_simd_128_ = false;
 bool CpuFeatures::supports_cetss_ = false;
-unsigned CpuFeatures::supported_ = 0;
+CpuFeatureSet CpuFeatures::supported_ = {};
 unsigned CpuFeatures::icache_line_size_ = 0;
 unsigned CpuFeatures::dcache_line_size_ = 0;
 unsigned CpuFeatures::vlen_ = 0;
@@ -340,10 +340,12 @@ IndirectHandle<HeapObject> AssemblerBase::GetEmbeddedObject(
   return embedded_objects_[index];
 }
 
+void AssemblerBase::RecordJSDispatchHandle(JSDispatchHandle handle,
+                                           uint16_t argument_count) {
+  js_dispatch_handles_.push_back({handle, argument_count});
+}
+
 int Assembler::WriteCodeComments() {
-  if (!v8_flags.code_comments) return 0;
-  CHECK_IMPLIES(code_comments_writer_.entry_count() > 0,
-                options().emit_code_comments);
   if (code_comments_writer_.entry_count() == 0) return 0;
   int offset = pc_offset();
   code_comments_writer_.Emit(this);

@@ -163,6 +163,18 @@ v8_flag(
     default = True,
 )
 
+v8_flag(
+    name = "v8_enable_undefined_double",
+    default = True,
+)
+
+v8_flag(name = "v8_enable_experimental_tq_to_tsa")
+
+v8_flag(
+    name = "v8_use_host_cpu_arm_features",
+    default = True,
+)
+
 # Default setting for v8_enable_maglev
 selects.config_setting_group(
     name = "maglev_by_default",
@@ -230,6 +242,11 @@ v8_flag(
 
 v8_flag(
     name = "v8_enable_drumbrake_tracing",
+    default = False,
+)
+
+v8_flag(
+    name = "v8_enable_seeded_array_index_hash",
     default = False,
 )
 
@@ -505,8 +522,11 @@ v8_config(
         "v8_enable_webassembly": "V8_ENABLE_WEBASSEMBLY",
         "v8_enable_drumbrake": "V8_ENABLE_DRUMBRAKE",
         "v8_enable_drumbrake_tracing": "V8_ENABLE_DRUMBRAKE_TRACING",
+        "v8_enable_seeded_array_index_hash": "V8_ENABLE_SEEDED_ARRAY_INDEX_HASH",
         "v8_jitless": "V8_JITLESS",
         "v8_enable_vtunejit": "ENABLE_VTUNE_JIT_INTERFACE",
+        "v8_enable_undefined_double": "V8_ENABLE_UNDEFINED_DOUBLE",
+        "v8_use_host_cpu_arm_features": "V8_USE_HOST_CPU_ARM_FEATURES",
     },
     defines = [
         "GOOGLE3",
@@ -823,8 +843,9 @@ filegroup(
         "src/base/compiler-specific.h",
         "src/base/container-utils.h",
         "src/base/contextual.h",
-        "src/base/cpu.cc",
-        "src/base/cpu.h",
+        "src/base/cpu/cpu.cc",
+        "src/base/cpu/cpu.h",
+        "src/base/cpu/cpu-helper.h",
         "src/base/debug/stack_trace.cc",
         "src/base/debug/stack_trace.h",
         "src/base/discriminated-union.h",
@@ -976,6 +997,25 @@ filegroup(
             "src/base/platform/platform-win32.cc",
             "src/base/platform/platform-win32.h",
             "src/base/win32-headers.h",
+        ],
+    }) + select({
+        "@v8//bazel/config:v8_target_x64": [
+            "src/base/cpu/cpu-x86.cc",
+        ],
+        "@v8//bazel/config:v8_target_ia32": [
+            "src/base/cpu/cpu-x86.cc",
+        ],
+        "@v8//bazel/config:v8_target_arm64": [
+            "src/base/cpu/cpu-arm.cc",
+        ],
+        "@v8//bazel/config:v8_target_arm": [
+            "src/base/cpu/cpu-arm.cc",
+        ],
+        "@v8//bazel/config:v8_target_ppc64le": [
+            "src/base/cpu/cpu-ppc.cc",
+        ],
+        "@v8//bazel/config:v8_target_riscv64": [
+            "src/base/cpu/cpu-riscv.cc",
         ],
     }),
     visibility = ["//visibility:public"],
@@ -1258,13 +1298,15 @@ filegroup(
         "third_party/v8/builtins/array-sort.tq",
     ] + select({
         ":is_v8_enable_webassembly": [
-            "src/builtins/js-to-js.tq",
             "src/builtins/js-to-wasm.tq",
             "src/builtins/wasm.tq",
             "src/builtins/wasm-strings.tq",
             "src/builtins/wasm-to-js.tq",
             "src/debug/debug-wasm-objects.tq",
             "src/wasm/wasm-objects.tq",
+        ],
+        ":is_v8_enable_drumbrake": [
+            "src/wasm/wasm-interpreter-objects.tq"
         ],
         "//conditions:default": [],
     }),
@@ -1345,7 +1387,14 @@ filegroup(
         "src/torque/types.h",
         "src/torque/utils.cc",
         "src/torque/utils.h",
-    ],
+    ] + select({
+        ":is_v8_enable_experimental_tq_to_tsa": [
+            "src/torque/ast-visitor.h",
+            "src/torque/tsa-generator.cc",
+            "src/torque/tsa-generator.h",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 filegroup(
@@ -1430,7 +1479,12 @@ filegroup(
         "src/builtins/builtins-function.cc",
         "src/builtins/builtins-global.cc",
         "src/builtins/builtins-internal.cc",
+        "src/builtins/builtins-iterator.h",
+        "src/builtins/builtins-iterator-inl.h",
         "src/builtins/builtins-json.cc",
+        "src/builtins/builtins-math.cc",
+        "src/builtins/builtins-math-xsum.h",
+        "src/builtins/builtins-math-xsum.cc",
         "src/builtins/builtins-number.cc",
         "src/builtins/builtins-object.cc",
         "src/builtins/builtins-promise.h",
@@ -1453,6 +1507,7 @@ filegroup(
         "src/builtins/constants-table-builder.h",
         "src/builtins/data-view-ops.h",
         "src/builtins/profile-data-reader.h",
+        "src/builtins/superspread.h",
         "src/codegen/aligned-slot-allocator.cc",
         "src/codegen/aligned-slot-allocator.h",
         "src/codegen/assembler.cc",
@@ -1677,8 +1732,6 @@ filegroup(
         "src/extensions/externalize-string-extension.h",
         "src/extensions/gc-extension.cc",
         "src/extensions/gc-extension.h",
-        "src/extensions/ignition-statistics-extension.cc",
-        "src/extensions/ignition-statistics-extension.h",
         "src/extensions/statistics-extension.cc",
         "src/extensions/statistics-extension.h",
         "src/extensions/trigger-failure-extension.cc",
@@ -2008,6 +2061,7 @@ filegroup(
         "src/numbers/conversions.h",
         "src/numbers/conversions-inl.h",
         "src/numbers/hash-seed.h",
+        "src/numbers/hash-seed.cc",
         "src/numbers/hash-seed-inl.h",
         "src/numbers/ieee754.cc",
         "src/numbers/ieee754.h",
@@ -2126,6 +2180,9 @@ filegroup(
         "src/objects/js-collection-inl.h",
         "src/objects/js-collection-iterator.h",
         "src/objects/js-collection-iterator-inl.h",
+        "src/objects/js-data-object-builder.cc",
+        "src/objects/js-data-object-builder.h",
+        "src/objects/js-data-object-builder-inl.h",
         "src/objects/js-disposable-stack.cc",
         "src/objects/js-disposable-stack.h",
         "src/objects/js-disposable-stack-inl.h",
@@ -2367,7 +2424,6 @@ filegroup(
         "src/profiler/heap-snapshot-common.h",
         "src/profiler/heap-snapshot-generator.cc",
         "src/profiler/heap-snapshot-generator.h",
-        "src/profiler/heap-snapshot-generator-inl.h",
         "src/profiler/output-stream-writer.h",
         "src/profiler/profile-generator.cc",
         "src/profiler/profile-generator.h",
@@ -2400,6 +2456,10 @@ filegroup(
         "src/regexp/regexp.h",
         "src/regexp/regexp-ast.cc",
         "src/regexp/regexp-ast.h",
+        "src/regexp/regexp-ast-printer.cc",
+        "src/regexp/regexp-ast-printer.h",
+        "src/regexp/regexp-bytecode-analysis.cc",
+        "src/regexp/regexp-bytecode-analysis.h",
         "src/regexp/regexp-bytecode-generator.cc",
         "src/regexp/regexp-bytecode-generator.h",
         "src/regexp/regexp-bytecode-generator-inl.h",
@@ -2421,6 +2481,8 @@ filegroup(
         "src/regexp/regexp-error.cc",
         "src/regexp/regexp-error.h",
         "src/regexp/regexp-flags.h",
+        "src/regexp/regexp-graph-printer.cc",
+        "src/regexp/regexp-graph-printer.h",
         "src/regexp/regexp-interpreter.cc",
         "src/regexp/regexp-interpreter.h",
         "src/regexp/regexp-macro-assembler.cc",
@@ -2429,8 +2491,12 @@ filegroup(
         "src/regexp/regexp-macro-assembler-tracer.cc",
         "src/regexp/regexp-macro-assembler-tracer.h",
         "src/regexp/regexp-nodes.h",
+        "src/regexp/regexp-node-printer.cc",
+        "src/regexp/regexp-node-printer.h",
         "src/regexp/regexp-parser.cc",
         "src/regexp/regexp-parser.h",
+        "src/regexp/regexp-printer.cc",
+        "src/regexp/regexp-printer.h",
         "src/regexp/regexp-result-vector.cc",
         "src/regexp/regexp-result-vector.h",
         "src/regexp/regexp-stack.cc",
@@ -2504,8 +2570,6 @@ filegroup(
         "src/sandbox/trusted-pointer-table.cc",
         "src/sandbox/trusted-pointer-table.h",
         "src/sandbox/trusted-pointer-table-inl.h",
-        "src/sandbox/code-pointer.h",
-        "src/sandbox/code-pointer-inl.h",
         "src/sandbox/code-sandboxing-mode.h",
         "src/sandbox/compactible-external-entity-table-inl.h",
         "src/sandbox/compactible-external-entity-table.h",
@@ -2523,12 +2587,16 @@ filegroup(
         "src/sandbox/hardware-support.h",
         "src/sandbox/sandbox.cc",
         "src/sandbox/sandbox.h",
+        "src/sandbox/sandboxable-thread.cc",
+        "src/sandbox/sandboxable-thread.h",
         "src/sandbox/sandbox-malloc.h",
         "src/sandbox/sandboxed-pointer.h",
         "src/sandbox/sandboxed-pointer-inl.h",
         "src/sandbox/tagged-payload.h",
         "src/sandbox/testing.cc",
         "src/sandbox/testing.h",
+        "src/sandbox/trap-fuzzer.cc",
+        "src/sandbox/trap-fuzzer.h",
         "src/snapshot/builtins-effects-dummy.cc",
         "src/snapshot/code-serializer.cc",
         "src/snapshot/code-serializer.h",
@@ -2832,6 +2900,7 @@ filegroup(
             "src/codegen/riscv/constant-riscv-f.h",
             "src/codegen/riscv/constant-riscv-m.h",
             "src/codegen/riscv/constant-riscv-v.h",
+            "src/codegen/riscv/constant-riscv-zfa.h",
             "src/codegen/riscv/constant-riscv-zicsr.h",
             "src/codegen/riscv/constant-riscv-zifencei.h",
             "src/codegen/riscv/constants-riscv.h",
@@ -2843,6 +2912,8 @@ filegroup(
             "src/codegen/riscv/extension-riscv-inl.h",
             "src/codegen/riscv/extension-riscv-m.h",
             "src/codegen/riscv/extension-riscv-v.h",
+            "src/codegen/riscv/extension-riscv-zfa.cc",
+            "src/codegen/riscv/extension-riscv-zfa.h",
             "src/codegen/riscv/extension-riscv-zicsr.h",
             "src/codegen/riscv/extension-riscv-zifencei.h",
             "src/codegen/riscv/extension-riscv-zimop.cc",
@@ -2917,6 +2988,7 @@ filegroup(
         "//conditions:default": [],
     }) + select({
         ":enable_maglev": [
+            "src/maglev/hamt.h",
             "src/maglev/maglev-assembler-inl.h",
             "src/maglev/maglev-assembler.h",
             "src/maglev/maglev-basic-block.h",
@@ -2940,6 +3012,8 @@ filegroup(
             "src/maglev/maglev-ir-inl.h",
             "src/maglev/maglev-ir.h",
             "src/maglev/maglev-kna-processor.h",
+            "src/maglev/maglev-map-inference.h",
+            "src/maglev/maglev-node-type.h",
             "src/maglev/maglev-phi-representation-selector.h",
             "src/maglev/maglev-truncation.h",
             "src/maglev/maglev-pipeline-statistics.h",
@@ -2971,7 +3045,9 @@ filegroup(
             "src/maglev/maglev-inlining.cc",
             "src/maglev/maglev-interpreter-frame-state.cc",
             "src/maglev/maglev-ir.cc",
+            "src/maglev/maglev-node-type.cc",
             "src/maglev/maglev-phi-representation-selector.cc",
+            "src/maglev/maglev-tracer.h",
             "src/maglev/maglev-truncation.cc",
             "src/maglev/maglev-pipeline-statistics.cc",
             "src/maglev/maglev-range-verification.cc",
@@ -3057,6 +3133,7 @@ filegroup(
             "src/wasm/constant-expression-interface.cc",
             "src/wasm/constant-expression-interface.h",
             "src/wasm/decoder.h",
+            "src/wasm/effect-handler.h",
             "src/wasm/function-body-decoder.cc",
             "src/wasm/function-body-decoder.h",
             "src/wasm/function-body-decoder-impl.h",
@@ -3078,7 +3155,6 @@ filegroup(
             "src/wasm/module-instantiate.h",
             "src/wasm/names-provider.cc",
             "src/wasm/names-provider.h",
-            "src/wasm/object-access.h",
             "src/wasm/pgo.cc",
             "src/wasm/pgo.h",
             "src/wasm/signature-hashing.h",
@@ -3114,6 +3190,7 @@ filegroup(
             "src/wasm/wasm-disassembler.h",
             "src/wasm/wasm-disassembler-impl.h",
             "src/wasm/wasm-engine.cc",
+            "src/wasm/wasm-engine-globals.h",
             "src/wasm/wasm-engine.h",
             "src/wasm/wasm-export-wrapper-cache.cc",
             "src/wasm/wasm-export-wrapper-cache.h",
@@ -3418,8 +3495,6 @@ filegroup(
         "src/compiler/operator-properties.h",
         "src/compiler/osr.cc",
         "src/compiler/osr.h",
-        "src/compiler/pair-load-store-reducer.cc",
-        "src/compiler/pair-load-store-reducer.h",
         "src/compiler/per-isolate-compiler-cache.h",
         "src/compiler/persistent-map.h",
         "src/compiler/phase.h",
@@ -3455,8 +3530,6 @@ filegroup(
         "src/compiler/simplified-operator-reducer.h",
         "src/compiler/state-values-utils.cc",
         "src/compiler/state-values-utils.h",
-        "src/compiler/string-builder-optimizer.cc",
-        "src/compiler/string-builder-optimizer.h",
         "src/compiler/turbofan.h",
         "src/compiler/turbofan-enabled.cc",
         "src/compiler/turbofan-graph.cc",
@@ -3546,6 +3619,7 @@ filegroup(
         "src/compiler/turboshaft/machine-lowering-phase.cc",
         "src/compiler/turboshaft/machine-lowering-phase.h",
         "src/compiler/turboshaft/machine-lowering-reducer-inl.h",
+        "src/compiler/turboshaft/maglev-assert-types-reducer.h",
         "src/compiler/turboshaft/turbolev-early-lowering-reducer-inl.h",
         "src/compiler/turboshaft/turbolev-frontend-pipeline.cc",
         "src/compiler/turboshaft/turbolev-frontend-pipeline.h",
@@ -3558,8 +3632,8 @@ filegroup(
         "src/compiler/turboshaft/operations.cc",
         "src/compiler/turboshaft/operations.h",
         "src/compiler/turboshaft/opmasks.h",
-        "src/compiler/turboshaft/optimize-phase.cc",
-        "src/compiler/turboshaft/optimize-phase.h",
+        "src/compiler/turboshaft/memory-optimization-phase.cc",
+        "src/compiler/turboshaft/memory-optimization-phase.h",
         "src/compiler/turboshaft/phase.cc",
         "src/compiler/turboshaft/phase.h",
         "src/compiler/turboshaft/pipelines.cc",
@@ -3581,8 +3655,8 @@ filegroup(
         "src/compiler/turboshaft/snapshot-table.h",
         "src/compiler/turboshaft/snapshot-table-opindex.h",
         "src/compiler/turboshaft/stack-check-lowering-reducer.h",
-        "src/compiler/turboshaft/store-store-elimination-phase.cc",
-        "src/compiler/turboshaft/store-store-elimination-phase.h",
+        "src/compiler/turboshaft/load-elimination-phase.cc",
+        "src/compiler/turboshaft/load-elimination-phase.h",
         "src/compiler/turboshaft/store-store-elimination-reducer-inl.h",
         "src/compiler/turboshaft/string-escape-analysis-reducer.cc",
         "src/compiler/turboshaft/string-escape-analysis-reducer.h",
@@ -3739,6 +3813,7 @@ filegroup(
         # include them explicitely when Maglev is disabled.
         ":enable_maglev": [],
         "//conditions:default": [
+            "src/maglev/hamt.h",
             "src/maglev/maglev-basic-block.h",
             "src/maglev/maglev-code-gen-state.h",
             "src/maglev/maglev-code-gen-state-inl.h",
@@ -3769,6 +3844,8 @@ filegroup(
             "src/maglev/maglev-ir.h",
             "src/maglev/maglev-ir-inl.h",
             "src/maglev/maglev-kna-processor.h",
+            "src/maglev/maglev-node-type.cc",
+            "src/maglev/maglev-node-type.h",
             "src/maglev/maglev-range.h",
             "src/maglev/maglev-range-analysis.h",
             "src/maglev/maglev-range-verification.cc",
@@ -3778,6 +3855,7 @@ filegroup(
             "src/maglev/maglev-register-frame-array.h",
             "src/maglev/maglev-phi-representation-selector.cc",
             "src/maglev/maglev-phi-representation-selector.h",
+            "src/maglev/maglev-tracer.h",
             "src/maglev/maglev-truncation.cc",
             "src/maglev/maglev-truncation.h",
             "src/maglev/maglev-post-hoc-optimizations-processors.h",
@@ -4066,24 +4144,20 @@ filegroup(
     name = "v8_bigint",
     srcs = [
         "src/bigint/bigint.h",
+        "src/bigint/bigint-inl.h",
         "src/bigint/bigint-internal.cc",
         "src/bigint/bigint-internal.h",
-        "src/bigint/bitwise.cc",
-        "src/bigint/digit-arithmetic.h",
         "src/bigint/div-barrett.cc",
         "src/bigint/div-burnikel.cc",
-        "src/bigint/div-helpers.cc",
-        "src/bigint/div-helpers.h",
+        "src/bigint/div-helpers-inl.h",
         "src/bigint/div-schoolbook.cc",
         "src/bigint/fromstring.cc",
         "src/bigint/mul-fft.cc",
         "src/bigint/mul-karatsuba.cc",
-        "src/bigint/mul-schoolbook.cc",
         "src/bigint/mul-toom.cc",
         "src/bigint/tostring.cc",
         "src/bigint/util.h",
-        "src/bigint/vector-arithmetic.cc",
-        "src/bigint/vector-arithmetic.h",
+        "src/bigint/vector-arithmetic-inl.h",
     ],
 )
 
@@ -4423,6 +4497,8 @@ filegroup(
         "src/d8/d8-platforms.h",
         "src/d8/d8-posix.cc",
         "src/d8/d8-test.cc",
+        "src/d8/hardware-watchpoints.cc",
+        "src/d8/hardware-watchpoints.h",
     ],
 )
 

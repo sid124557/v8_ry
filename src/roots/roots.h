@@ -44,7 +44,8 @@ class RootVisitor;
 
 // Adapts one INTERNALIZED_STRING_LIST_GENERATOR entry to
 // the ROOT_LIST-compatible entry
-#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) V(String, name, name)
+#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) \
+  V(InternalizedString, name, name)
 
 // Produces (String, name, CamelCase) entries
 #define EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V) \
@@ -98,6 +99,7 @@ class RootVisitor;
   V(UninitializedHole, uninitialized_value, UninitializedValue)                \
   /* Maps */                                                                   \
   V(Map, meta_map, MetaMap)                                                    \
+  V(Map, weak_homomorphic_fixed_array_map, WeakHomomorphicFixedArrayMap)       \
   V(Map, free_space_map, FreeSpaceMap)                                         \
   V(Map, one_pointer_filler_map, OnePointerFillerMap)                          \
   V(Map, two_pointer_filler_map, TwoPointerFillerMap)                          \
@@ -115,6 +117,7 @@ class RootVisitor;
   V(Map, feedback_metadata_map, FeedbackMetadataArrayMap)                      \
   V(Map, feedback_vector_map, FeedbackVectorMap)                               \
   V(Map, foreign_map, ForeignMap)                                              \
+  V(Map, function_template_info_map, FunctionTemplateInfoMap)                  \
   V(Map, global_dictionary_map, GlobalDictionaryMap)                           \
   V(Map, instruction_stream_map, InstructionStreamMap)                         \
   V(Map, interceptor_info_map, InterceptorInfoMap)                             \
@@ -127,6 +130,7 @@ class RootVisitor;
   V(Map, no_closures_cell_map, NoClosuresCellMap)                              \
   V(Map, number_dictionary_map, NumberDictionaryMap)                           \
   V(Map, object_boilerplate_description_map, ObjectBoilerplateDescriptionMap)  \
+  V(Map, object_template_info_map, ObjectTemplateInfoMap)                      \
   V(Map, one_closure_cell_map, OneClosureCellMap)                              \
   V(Map, ordered_hash_map_map, OrderedHashMapMap)                              \
   V(Map, ordered_hash_set_map, OrderedHashSetMap)                              \
@@ -137,6 +141,7 @@ class RootVisitor;
   V(Map, registered_symbol_table_map, RegisteredSymbolTableMap)                \
   V(Map, scope_info_map, ScopeInfoMap)                                         \
   V(Map, script_context_table_map, ScriptContextTableMap)                      \
+  V(Map, sloppy_arguments_elements_map, SloppyArgumentsElementsMap)            \
   V(Map, simple_name_dictionary_map, SimpleNameDictionaryMap)                  \
   V(Map, simple_number_dictionary_map, SimpleNumberDictionaryMap)              \
   V(Map, small_ordered_hash_map_map, SmallOrderedHashMapMap)                   \
@@ -154,11 +159,11 @@ class RootVisitor;
           WasmExportedFunctionDataMap)                                         \
   IF_WASM(V, Map, wasm_internal_function_map, WasmInternalFunctionMap)         \
   IF_WASM(V, Map, wasm_func_ref_map, WasmFuncRefMap)                           \
-  IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
   IF_WASM(V, Map, wasm_null_map, WasmNullMap)                                  \
   IF_WASM(V, Map, wasm_resume_data_map, WasmResumeDataMap)                     \
   IF_WASM(V, Map, wasm_suspender_object_map, WasmSuspenderObjectMap)           \
   IF_WASM(V, Map, wasm_continuation_object_map, WasmContinuationObjectMap)     \
+  IF_WASM(V, Map, wasm_stack_object_map, WasmStackObjectMap)                   \
   IF_WASM(V, Map, wasm_trusted_instance_data_map, WasmTrustedInstanceDataMap)  \
   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
@@ -239,7 +244,9 @@ class RootVisitor;
     EmptyOrderedPropertyDictionary)                                            \
   V(SwissNameDictionary, empty_swiss_property_dictionary,                      \
     EmptySwissPropertyDictionary)                                              \
-  V(InterceptorInfo, noop_interceptor_info, NoOpInterceptorInfo)               \
+  V(InterceptorInfo, noop_named_interceptor_info, NoOpNamedInterceptorInfo)    \
+  V(InterceptorInfo, noop_indexed_interceptor_info,                            \
+    NoOpIndexedInterceptorInfo)                                                \
   V(ArrayList, empty_array_list, EmptyArrayList)                               \
   V(WeakFixedArray, empty_weak_fixed_array, EmptyWeakFixedArray)               \
   STRONG_READ_ONLY_HEAP_NUMBER_ROOT_LIST(V)                                    \
@@ -273,7 +280,9 @@ class RootVisitor;
   V(ProtectedFixedArray, empty_protected_fixed_array,                     \
     EmptyProtectedFixedArray)                                             \
   V(ProtectedWeakFixedArray, empty_protected_weak_fixed_array,            \
-    EmptyProtectedWeakFixedArray)
+    EmptyProtectedWeakFixedArray)                                         \
+  IF_WASM(V, WasmDispatchTable, empty_wasm_dispatch_table,                \
+          EmptyWasmDispatchTable)
 
 #define BUILTINS_WITH_SFI_LIST_GENERATOR(APPLY, V)                             \
   APPLY(V, ProxyRevoke, proxy_revoke)                                          \
@@ -354,6 +363,7 @@ class RootVisitor;
   V(PropertyCell, array_iterator_protector, ArrayIteratorProtector)            \
   V(PropertyCell, array_buffer_detaching_protector,                            \
     ArrayBufferDetachingProtector)                                             \
+  V(PropertyCell, array_buffer_mutable_protector, ArrayBufferMutableProtector) \
   V(PropertyCell, promise_hook_protector, PromiseHookProtector)                \
   V(PropertyCell, promise_resolve_protector, PromiseResolveProtector)          \
   V(PropertyCell, map_iterator_protector, MapIteratorProtector)                \
@@ -389,6 +399,9 @@ class RootVisitor;
   /* Caches */                                                              \
   V(SmiStringCache, smi_string_cache, SmiStringCache)                       \
   V(DoubleStringCache, double_string_cache, DoubleStringCache)              \
+  /* undefined or BigInt. Caching divisors used for modulo divisions. */    \
+  V(Object, cached_bigint_divisor, CachedBigIntDivisor)                     \
+  V(Object, next_cached_bigint_divisor, NextCachedBigIntDivisor)            \
   /* Lists and dictionaries */                                              \
   V(RegisteredSymbolTable, public_symbol_table, PublicSymbolTable)          \
   V(RegisteredSymbolTable, api_symbol_table, ApiSymbolTable)                \
@@ -722,8 +735,13 @@ class RootsTable {
   friend class RootsSerializer;
 };
 
-inline ReadOnlyRoots GetReadOnlyRoots();
+#ifdef V8_STATIC_ROOTS
+#define V8_RO_CONST V8_CONST
+#else
+#define V8_RO_CONST
+#endif
 
+V8_RO_CONST inline ReadOnlyRoots GetReadOnlyRoots();
 class ReadOnlyRoots {
  public:
   static constexpr size_t kEntriesCount =
@@ -737,9 +755,9 @@ class ReadOnlyRoots {
   // map-word instead of a tagged heap pointer.
   MapWord one_pointer_filler_map_word();
 
-#define ROOT_ACCESSOR(Type, name, CamelName) \
-  V8_INLINE Tagged<Type> name() const;       \
-  V8_INLINE Tagged<Type> unchecked_##name() const;
+#define ROOT_ACCESSOR(Type, name, CamelName)       \
+  V8_RO_CONST V8_INLINE Tagged<Type> name() const; \
+  V8_RO_CONST V8_INLINE Tagged<Type> unchecked_##name() const;
 
   READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
@@ -751,12 +769,12 @@ class ReadOnlyRoots {
   void VerifyTypes();
 #endif
 
-  V8_INLINE Tagged<Boolean> boolean_value(bool value) const;
+  V8_RO_CONST V8_INLINE Tagged<Boolean> boolean_value(bool value) const;
 
-  V8_INLINE Tagged<String> single_character_string(int code) const;
+  V8_RO_CONST V8_INLINE Tagged<String> single_character_string(int code) const;
 
-  V8_INLINE Address address_at(RootIndex root_index) const;
-  V8_INLINE Tagged<Object> object_at(RootIndex root_index) const;
+  V8_RO_CONST V8_INLINE Address address_at(RootIndex root_index) const;
+  V8_RO_CONST V8_INLINE Tagged<Object> object_at(RootIndex root_index) const;
 
   // Check if a slot is initialized yet. Should only be necessary for code
   // running during snapshot creation.
@@ -784,6 +802,13 @@ class ReadOnlyRoots {
   friend class DeserializerAllocator;
   friend class ReadOnlyHeapImageDeserializer;
   friend ReadOnlyRoots GetReadOnlyRoots();
+};
+
+// Subclass for RORoots loaded specifically early in the snapshot
+// deserializtion.
+class EarlyReadOnlyRoots : public ReadOnlyRoots {
+ public:
+  explicit EarlyReadOnlyRoots(ReadOnlyRoots roots) : ReadOnlyRoots(roots) {}
 };
 
 }  // namespace internal

@@ -94,13 +94,28 @@ void LookupIterator::Next() {
 }
 
 template <bool is_element>
-void LookupIterator::NextInternal(Tagged<Map> map, Tagged<JSReceiver> holder) {
+void LookupIterator::NextInternal(Tagged<Map> orig_map,
+                                  Tagged<JSReceiver> holder) {
+  Tagged<Map> map = orig_map;
   do {
     Tagged<JSReceiver> maybe_holder = NextHolder(map);
     if (maybe_holder.is_null()) {
-      if (interceptor_state_ == InterceptorState::kSkipNonMasking) {
-        RestartLookupForNonMaskingInterceptors<is_element>();
-        return;
+      switch (interceptor_state_) {
+        case InterceptorState::kSkipNonMasking:
+          // If we've found a non-masking interceptor, but we're not checking
+          // the prototype chain, we need to do this now.
+          if (!check_prototype_chain()) {
+            interceptor_state_ = InterceptorState::kSkipNonMaskingOwnProperty;
+            continue;
+          }
+          [[fallthrough]];
+        // We're at the end of the chain, and haven't found anything, so
+        // non-masking interceptors can be applied.
+        case InterceptorState::kSkipNonMaskingOwnProperty:
+          RestartLookupForNonMaskingInterceptors<is_element>();
+          return;
+        default:
+          break;
       }
       state_ = NOT_FOUND;
       if (holder != *holder_) holder_ = direct_handle(holder, isolate_);
@@ -109,7 +124,37 @@ void LookupIterator::NextInternal(Tagged<Map> map, Tagged<JSReceiver> holder) {
     holder = maybe_holder;
     map = holder->map(isolate_);
     state_ = LookupInHolder<is_element>(map, holder);
+    if (interceptor_state_ == InterceptorState::kSkipNonMaskingOwnProperty &&
+        IsFound()) {
+      // In theory we also need to check JSPROXY but since the iterator doesn't
+      // know which question to ask, we assume the lookup succeeds.
+      switch (state_) {
+        // https://webidl.spec.whatwg.org/#dfn-named-property-visibility says a
+        // second interceptor on the prototype chain is invisible.
+        case INTERCEPTOR:
+          continue;
+        case ACCESS_CHECK: {
+          // If an access check fails, we assume the lookup succeeds.
+          if (HasAccess()) {
+            continue;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+      // We need fully reset state, since this is not a true hit.
+      number_ = InternalIndex::NotFound();
+      property_details_ = PropertyDetails::Empty();
+      state_ = NOT_FOUND;
+      if (holder != *holder_) holder_ = direct_handle(holder, isolate_);
+      return;
+    }
   } while (!IsFound());
+
+  if (V8_UNLIKELY(is_element && IsJSArrayMap(orig_map))) {
+    isolate_->CountUsage(v8::Isolate::kHoleyArrayReadthrough);
+  }
 
   holder_ = direct_handle(holder, isolate_);
 }
@@ -430,6 +475,12 @@ void LookupIterator::PrepareForDataProperty(DirectHandle<Object> value) {
     // Check that current value matches new value otherwise we should make
     // the property mutable.
     if (holder->HasFastProperties(isolate_)) {
+      if (property_details_.representation().IsDouble() && IsNumber(*value)) {
+        double v = Object::NumberValue(*value);
+        if (std::isnan(v)) {
+          value = isolate_->factory()->nan_value();
+        }
+      }
       if (!CanStayConst(*value)) new_constness = PropertyConstness::kMutable;
     } else if (V8_DICT_PROPERTY_CONST_TRACKING_BOOL) {
       if (!DictCanStayConst(*value)) {
@@ -612,7 +663,7 @@ void LookupIterator::ReconfigureDataProperty(DirectHandle<Object> value,
 // private field, otherwise JSProxy has to be handled via a trap.
 // Adding properties to primitive values is not observable.
 void LookupIterator::PrepareTransitionToDataProperty(
-    DirectHandle<JSReceiver> receiver, DirectHandle<Object> value,
+    DirectHandle<JSTransitionableReceiver> receiver, DirectHandle<Object> value,
     PropertyAttributes attributes, StoreOrigin store_origin) {
   DCHECK_IMPLIES(IsJSProxy(*receiver, isolate_), name()->IsAnyPrivate());
   DCHECK_IMPLIES(!receiver.is_identical_to(GetStoreTarget<JSReceiver>()),
@@ -675,7 +726,8 @@ void LookupIterator::PrepareTransitionToDataProperty(
 }
 
 Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
-    DirectHandle<JSReceiver> receiver, Maybe<ShouldThrow> should_throw) {
+    DirectHandle<JSTransitionableReceiver> receiver,
+    Maybe<ShouldThrow> should_throw) {
   DCHECK_EQ(TRANSITION, state_);
 
   DCHECK_IMPLIES(!receiver.is_identical_to(GetStoreTarget<JSReceiver>()),
@@ -705,7 +757,7 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
   }
   DirectHandle<Map> transition = transition_map();
   bool simple_transition =
-      transition->GetBackPointer(isolate_) == receiver->map(isolate_);
+      transition->GetBackPointer() == receiver->map(isolate_);
 
   if (configuration_ == DEFAULT && !transition->is_dictionary_map() &&
       !transition->is_prototype_map() &&
@@ -721,6 +773,8 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
   }
 
   if (!IsJSProxy(*receiver, isolate_)) {
+    static_assert(std::is_same_v<JSTransitionableReceiver::Without<JSProxy>,
+                                 Union<JSObject>>);
     JSObject::MigrateToMap(isolate_, Cast<JSObject>(receiver), transition);
   }
 
@@ -735,16 +789,17 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
     }
     if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
       DirectHandle<SwissNameDictionary> dictionary(
-          receiver->property_dictionary_swiss(isolate_), isolate_);
+          Cast<JSReceiver>(receiver)->property_dictionary_swiss(isolate_),
+          isolate_);
 
       dictionary =
           SwissNameDictionary::Add(isolate(), dictionary, name(),
                                    isolate_->factory()->uninitialized_value(),
                                    property_details_, &number_);
-      receiver->SetProperties(*dictionary);
+      Cast<JSReceiver>(receiver)->SetProperties(*dictionary);
     } else {
       DirectHandle<NameDictionary> dictionary(
-          receiver->property_dictionary(isolate_), isolate_);
+          Cast<JSReceiver>(receiver)->property_dictionary(isolate_), isolate_);
 
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(
           isolate_, dictionary,
@@ -752,7 +807,7 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
                               isolate_->factory()->uninitialized_value(),
                               property_details_, &number_),
           Nothing<bool>());
-      receiver->SetProperties(*dictionary);
+      Cast<JSReceiver>(receiver)->SetProperties(*dictionary);
       // TODO(pthier): Add flags to swiss dictionaries.
       if (name()->IsInteresting(isolate())) {
         dictionary->set_may_have_interesting_properties(true);
@@ -827,7 +882,7 @@ void LookupIterator::TransitionToAccessorProperty(
     DirectHandle<Map> new_map = Map::TransitionToAccessorProperty(
         isolate_, old_map, name_, number_, getter, setter, attributes);
     bool simple_transition =
-        new_map->GetBackPointer(isolate_) == receiver->map(isolate_);
+        new_map->GetBackPointer() == receiver->map(isolate_);
     JSObject::MigrateToMap(isolate_, receiver, new_map);
 
     if (simple_transition) {
@@ -889,7 +944,7 @@ void LookupIterator::TransitionToAccessorPair(DirectHandle<Object> pair,
     if (receiver->HasSlowArgumentsElements(isolate_)) {
       Tagged<SloppyArgumentsElements> parameter_map =
           Cast<SloppyArgumentsElements>(receiver->elements(isolate_));
-      uint32_t length = parameter_map->length();
+      const uint32_t length = parameter_map->ulength().value();
       if (number_.is_found() && number_.as_uint32() < length) {
         parameter_map->set_mapped_entries(
             number_.as_int(), ReadOnlyRoots(isolate_).the_hole_value());
@@ -926,7 +981,7 @@ Tagged<JSObject> LookupIterator::GetHolderForApi() const {
 bool LookupIterator::HolderIsReceiver() const {
   DCHECK_NE(state_, STRING_LOOKUP_START_OBJECT);
   DCHECK(has_property_ || state_ == INTERCEPTOR || state_ == JSPROXY ||
-         state_ == TYPED_ARRAY_INDEX_NOT_FOUND);
+         state_ == TYPED_ARRAY_INDEX_NOT_FOUND || state_ == MODULE_NAMESPACE);
   // Optimization that only works if configuration_ is not mutable.
   if (!check_prototype_chain()) return true;
   return *receiver_ == *holder_;
@@ -934,7 +989,8 @@ bool LookupIterator::HolderIsReceiver() const {
 
 bool LookupIterator::HolderIsReceiverOrHiddenPrototype() const {
   DCHECK_NE(state_, STRING_LOOKUP_START_OBJECT);
-  DCHECK(has_property_ || state_ == INTERCEPTOR || state_ == JSPROXY);
+  DCHECK(has_property_ || state_ == INTERCEPTOR || state_ == JSPROXY ||
+         state_ == MODULE_NAMESPACE);
   // Optimization that only works if configuration_ is not mutable.
   if (!check_prototype_chain()) return true;
   if (*receiver_ == *holder_) return true;
@@ -978,7 +1034,7 @@ DirectHandle<Object> LookupIterator::FetchValue(
   } else {
     result =
         holder_->map(isolate_)->instance_descriptors(isolate_)->GetStrongValue(
-            isolate_, descriptor_number());
+            descriptor_number());
   }
   return direct_handle(result, isolate_);
 }
@@ -1000,18 +1056,14 @@ bool LookupIterator::CanStayConst(Tagged<Object> value) const {
       FieldIndex::ForDetails(holder->map(isolate_), property_details_);
   if (property_details_.representation().IsDouble()) {
     if (!IsNumber(value, isolate_)) return false;
-    uint64_t bits;
+    // Attempt to store HeapNumber with the hole NaN pattern should have
+    // already generalized field constness to kMutable.
+    DCHECK_IMPLIES(!IsSmi(value), !Cast<HeapNumber>(value)->is_the_hole());
     Tagged<Object> current_value =
         holder->RawFastPropertyAt(isolate_, field_index);
     DCHECK(IsHeapNumber(current_value, isolate_));
-    bits = Cast<HeapNumber>(current_value)->value_as_bits();
-    // Use bit representation of double to check for hole double, since
-    // manipulating the signaling NaN used for the hole in C++, e.g. with
-    // base::bit_cast or value(), will change its value on ia32 (the x87
-    // stack is used to return values and stores to the stack silently clear the
-    // signalling bit).
     // Only allow initializing stores to double to stay constant.
-    return bits == kHoleNanInt64;
+    return Cast<HeapNumber>(current_value)->is_the_hole();
   }
 
   Tagged<Object> current_value =
@@ -1048,21 +1100,20 @@ bool LookupIterator::DictCanStayConst(Tagged<Object> value) const {
   return IsUninitializedHole(current_value, isolate());
 }
 
-int LookupIterator::GetFieldDescriptorIndex() const {
+InternalIndex LookupIterator::GetFieldDescriptorIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties());
   DCHECK_EQ(PropertyLocation::kField, property_details_.location());
   DCHECK_EQ(PropertyKind::kData, property_details_.kind());
-  // TODO(jkummerow): Propagate InternalIndex further.
-  return descriptor_number().as_int();
+  return descriptor_number();
 }
 
-int LookupIterator::GetAccessorIndex() const {
+InternalIndex LookupIterator::GetAccessorIndex() const {
   DCHECK(has_property_);
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(PropertyLocation::kDescriptor, property_details_.location());
   DCHECK_EQ(PropertyKind::kAccessor, property_details_.kind());
-  return descriptor_number().as_int();
+  return descriptor_number();
 }
 
 FieldIndex LookupIterator::GetFieldIndex() const {
@@ -1146,10 +1197,16 @@ void LookupIterator::WriteDataValue(DirectHandle<Object> value,
   } else if (holder->HasFastProperties(isolate_)) {
     DCHECK(IsJSObject(*holder, isolate_));
     if (property_details_.location() == PropertyLocation::kField) {
+      if (property_details_.representation().IsDouble() && IsNumber(*value)) {
+        double v = Object::NumberValue(*value);
+        if (std::isnan(v)) {
+          value = isolate_->factory()->nan_value();
+        }
+      }
       // Check that in case of VariableMode::kConst field the existing value is
       // equal to |value|.
       DCHECK_IMPLIES(!initializing_store && property_details_.constness() ==
-                                                PropertyConstness::kConst,
+                                                 PropertyConstness::kConst,
                      CanStayConst(*value));
       Cast<JSObject>(*holder)->WriteToField(descriptor_number(),
                                             property_details_, *value);
@@ -1268,6 +1325,8 @@ bool LookupIterator::SkipInterceptor(Tagged<JSObject> holder) {
       case InterceptorState::kUninitialized:
         interceptor_state_ = InterceptorState::kSkipNonMasking;
         [[fallthrough]];
+      case InterceptorState::kSkipNonMaskingOwnProperty:
+        [[fallthrough]];
       case InterceptorState::kSkipNonMasking:
         return true;
       case InterceptorState::kProcessNonMasking:
@@ -1282,7 +1341,10 @@ Tagged<JSReceiver> LookupIterator::NextHolder(Tagged<Map> map) {
   if (map->prototype(isolate_) == ReadOnlyRoots(isolate_).null_value()) {
     return JSReceiver();
   }
-  if (!check_prototype_chain() && !IsJSGlobalProxyMap(map)) {
+  bool check_prototype_chain =
+      this->check_prototype_chain() ||
+      interceptor_state_ == InterceptorState::kSkipNonMaskingOwnProperty;
+  if (!check_prototype_chain && !IsJSGlobalProxyMap(map)) {
     return JSReceiver();
   }
   return Cast<JSReceiver>(map->prototype(isolate_));
@@ -1325,6 +1387,9 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
       if (IsJSProxyMap(map)) {
         if (is_element || !name_->IsAnyPrivate()) return JSPROXY;
       }
+      if (IsJSModuleNamespaceMap(map)) {
+        if (is_element || !name_->IsAnyPrivate()) return MODULE_NAMESPACE;
+      }
 #if V8_ENABLE_WEBASSEMBLY
       if (IsWasmObjectMap(map)) return WASM_OBJECT;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1346,7 +1411,7 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
         number_ = dict->FindEntry(isolate(), name_);
         if (number_.is_not_found()) return NOT_FOUND;
         Tagged<PropertyCell> cell = dict->CellAt(isolate_, number_);
-        if (IsPropertyCellHole(cell->value(isolate_), isolate_)) {
+        if (IsPropertyCellHole(cell->value(), isolate_)) {
           return NOT_FOUND;
         }
         property_details_ = cell->property_details();
@@ -1358,6 +1423,8 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
             return ACCESSOR;
         }
       }
+      [[fallthrough]];
+    case MODULE_NAMESPACE:
       return LookupInRegularHolder<is_element>(map, holder);
     case ACCESSOR:
     case DATA:
@@ -1551,7 +1618,8 @@ std::optional<Tagged<Object>> ConcurrentLookupIterator::TryGetOwnCowElement(
   // The former is the source of truth, but due to concurrent reads it may not
   // match the given `array_elements`.
   if (index >= static_cast<size_t>(array_length)) return {};
-  if (index >= static_cast<size_t>(array_elements->length())) return {};
+  if (index >= static_cast<size_t>(array_elements->ulength().value()))
+    return {};
 
   Tagged<Object> result = array_elements->get(static_cast<int>(index));
 
@@ -1599,10 +1667,11 @@ ConcurrentLookupIterator::TryGetOwnConstantElement(
   if (IsFrozenElementsKind(elements_kind)) {
     if (!IsFixedArray(elements)) return kGaveUp;
     Tagged<FixedArray> elements_fixed_array = Cast<FixedArray>(elements);
-    if (index >= static_cast<uint32_t>(elements_fixed_array->length())) {
+    if (index >= elements_fixed_array->ulength().value()) {
       return kGaveUp;
     }
-    Tagged<Object> result = elements_fixed_array->get(static_cast<int>(index));
+    Tagged<Object> result =
+        elements_fixed_array->get(static_cast<uint32_t>(index));
     if (IsHoleyElementsKindForRead(elements_kind) &&
         result == ReadOnlyRoots(isolate).the_hole_value()) {
       return kNotPresent;

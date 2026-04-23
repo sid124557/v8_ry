@@ -236,59 +236,15 @@ class PropertyCallbackInfo {
   V8_INLINE Local<Value> Data() const;
 
   /**
-   * \return The receiver. In many cases, this is the object on which the
-   * property access was intercepted. When using
-   * `Reflect.get`, `Function.prototype.call`, or similar functions, it is the
-   * object passed in as receiver or thisArg.
-   *
-   * \code
-   *  void GetterCallback(Local<Name> name,
-   *                      const v8::PropertyCallbackInfo<v8::Value>& info) {
-   *     auto context = info.GetIsolate()->GetCurrentContext();
-   *
-   *     v8::Local<v8::Value> a_this =
-   *         info.This()
-   *             ->GetRealNamedProperty(context, v8_str("a"))
-   *             .ToLocalChecked();
-   *     v8::Local<v8::Value> a_holder =
-   *         info.Holder()
-   *             ->GetRealNamedProperty(context, v8_str("a"))
-   *             .ToLocalChecked();
-   *
-   *    CHECK(v8_str("r")->Equals(context, a_this).FromJust());
-   *    CHECK(v8_str("obj")->Equals(context, a_holder).FromJust());
-   *
-   *    info.GetReturnValue().Set(name);
-   *  }
-   *
-   *  v8::Local<v8::FunctionTemplate> templ =
-   *  v8::FunctionTemplate::New(isolate);
-   *  templ->InstanceTemplate()->SetHandler(
-   *      v8::NamedPropertyHandlerConfiguration(GetterCallback));
-   *  LocalContext env;
-   *  env->Global()
-   *      ->Set(env.local(), v8_str("obj"), templ->GetFunction(env.local())
-   *                                           .ToLocalChecked()
-   *                                           ->NewInstance(env.local())
-   *                                           .ToLocalChecked())
-   *      .FromJust();
-   *
-   *  CompileRun("obj.a = 'obj'; var r = {a: 'r'}; Reflect.get(obj, 'x', r)");
-   * \endcode
-   */
-  V8_DEPRECATED(
-      "Access to receiver will be deprecated soon. Use HolderV2() instead. \n"
-      "See http://crbug.com/455600234. ")
-  V8_INLINE Local<Object> This() const;
-
-  /**
    * \return The object in the prototype chain of the receiver that has the
    * interceptor. Suppose you have `x` and its prototype is `y`, and `y`
    * has an interceptor. Then `info.This()` is `x` and `info.Holder()` is `y`.
    * In case the property is installed on the global object the Holder()
    * would return the global proxy.
-   * TODO(http://crbug.com/333672197): rename back to Holder().
    */
+  V8_INLINE Local<Object> Holder() const;
+  // TODO(http://crbug.com/333672197): deprecate and remove.
+  V8_DEPRECATE_SOON("Use Holder().")
   V8_INLINE Local<Object> HolderV2() const;
 
   /**
@@ -359,11 +315,7 @@ class PropertyCallbackInfo {
     kIsolateIndex = kFirstApiArgumentIndex,
     kReturnValueIndex,
     kCallbackInfoIndex,
-    // TODO(http://crbug.com/455600234): drop this once This() is removed.
-    kUnusedIndex,  // Optional, see I::kSPAlignmentSlotCount.
-    kHolderIndex = kUnusedIndex + I::kSPAlignmentSlotCount,
-    // TODO(http://crbug.com/455600234): drop this once This() is removed.
-    kThisIndex,
+    kHolderIndex,
 
     //
     // Optional part, used only by setter/definer/deleter callbacks.
@@ -733,13 +685,12 @@ Local<Value> PropertyCallbackInfo<T>::Data() const {
 }
 
 template <typename T>
-Local<Object> PropertyCallbackInfo<T>::This() const {
-  return Local<Object>::FromSlot(&args_[kThisIndex]);
+Local<Object> PropertyCallbackInfo<T>::Holder() const {
+  return Local<Object>::FromSlot(&args_[kHolderIndex]);
 }
-
 template <typename T>
 Local<Object> PropertyCallbackInfo<T>::HolderV2() const {
-  return Local<Object>::FromSlot(&args_[kHolderIndex]);
+  return Holder();
 }
 
 template <typename T>

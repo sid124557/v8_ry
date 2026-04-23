@@ -52,7 +52,8 @@ class JSSharedStruct
       Isolate* isolate,
       const base::Vector<const DirectHandle<Name>> field_names,
       const std::set<uint32_t>& element_names,
-      MaybeDirectHandle<String> maybe_registry_key);
+      MaybeDirectHandle<String> maybe_registry_key,
+      bool has_interesting_properties);
 
   static MaybeHandle<String> GetRegistryKey(Isolate* isolate,
                                             Tagged<Map> instance_map);
@@ -86,7 +87,7 @@ class SharedStructTypeRegistry final {
   MaybeDirectHandle<Map> Register(
       Isolate* isolate, Handle<String> key,
       const base::Vector<const DirectHandle<Name>> field_names,
-      const std::set<uint32_t>& element_names);
+      const std::set<uint32_t>& element_names, bool has_interesting_properties);
 
   void IterateElements(Isolate* isolate, RootVisitor* visitor);
   void NotifyElementsRemoved(int count);
@@ -97,7 +98,7 @@ class SharedStructTypeRegistry final {
   MaybeDirectHandle<Map> RegisterNoThrow(
       Isolate* isolate, Handle<String> key,
       const base::Vector<const DirectHandle<Name>> field_names,
-      const std::set<uint32_t>& element_names);
+      const std::set<uint32_t>& element_names, bool has_interesting_properties);
 
   MaybeDirectHandle<Map> CheckIfEntryMatches(
       Isolate* isolate, InternalIndex entry, DirectHandle<String> key,

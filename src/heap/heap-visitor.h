@@ -61,32 +61,37 @@ class MaybeObjectSize final {
   V(CoverageInfo)                     \
   V(DataHandler)                      \
   V(DebugInfo)                        \
+  V(DescriptorArray)                  \
+  V(StrongDescriptorArray)            \
   V(DoubleStringCache)                \
   V(EmbedderDataArray)                \
   V(EphemeronHashTable)               \
   V(ExternalString)                   \
   V(FeedbackCell)                     \
   V(FeedbackMetadata)                 \
+  V(FeedbackVector)                   \
   V(Foreign)                          \
   V(FunctionTemplateInfo)             \
   V(HeapNumber)                       \
   V(InterceptorInfo)                  \
   V(Hole)                             \
   V(Map)                              \
+  V(MegaDomHandler)                   \
   V(NativeContext)                    \
   V(Oddball)                          \
   V(PreparseData)                     \
   V(PropertyArray)                    \
   V(PropertyCell)                     \
+  V(JSProxy)                          \
   V(PrototypeInfo)                    \
   V(PrototypeSharedClosureInfo)       \
   V(RegExpBoilerplateDescription)     \
   V(RegExpDataWrapper)                \
+  V(ScopeInfo)                        \
   V(SeqOneByteString)                 \
   V(SeqTwoByteString)                 \
   V(SharedFunctionInfo)               \
   V(SlicedString)                     \
-  V(SloppyArgumentsElements)          \
   V(SmallOrderedHashMap)              \
   V(SmallOrderedHashSet)              \
   V(SmallOrderedNameDictionary)       \
@@ -104,7 +109,19 @@ class MaybeObjectSize final {
   IF_WASM(V, WasmResumeData)          \
   IF_WASM(V, WasmStruct)              \
   IF_WASM(V, WasmContinuationObject)  \
+  IF_WASM(V, WasmStackObject)         \
   IF_WASM(V, WasmTypeInfo)            \
+  V(TurbofanBitsetType)               \
+  V(TurbofanHeapConstantType)         \
+  V(TurbofanOtherNumberConstantType)  \
+  V(TurbofanRangeType)                \
+  V(TurbofanUnionType)                \
+  V(TurboshaftFloat64RangeType)       \
+  V(TurboshaftFloat64SetType)         \
+  V(TurboshaftWord32RangeType)        \
+  V(TurboshaftWord32SetType)          \
+  V(TurboshaftWord64RangeType)        \
+  V(TurboshaftWord64SetType)          \
   SIMPLE_HEAP_OBJECT_LIST1(V)
 
 // Visitation in here will refer to BodyDescriptors with the used size of the
@@ -172,7 +189,6 @@ class MaybeObjectSize final {
   V(SharedFunctionInfo)                                   \
   V(ShortcutCandidate)                                    \
   V(SlicedString)                                         \
-  V(SloppyArgumentsElements)                              \
   V(Symbol)                                               \
   V(ThinString)                                           \
   V(TransitionArray)                                      \

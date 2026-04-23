@@ -196,6 +196,11 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef, Label::Distance distance);
 
+  void LoadFeedbackCell(Register dst, Register closure);
+  void LoadFeedbackVectorFromCell(Register dst, Register feedback_cell,
+                                  Register scratch, Label* fbv_undef,
+                                  Label::Distance distance);
+
   void LoadInterpreterDataBytecodeArray(Register destination,
                                         Register interpreter_data);
   void LoadInterpreterDataInterpreterTrampoline(Register destination,
@@ -499,8 +504,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
 
   // Allocates an EXIT/BUILTIN_EXIT/API_CALLBACK_EXIT frame with given number
   // of slots in non-GCed area.
-  void EnterExitFrame(int extra_slots, StackFrame::Type frame_type,
-                      Register c_function);
+  void EnterExitFrame(int extra_slots, StackFrame::Type frame_type);
   void LeaveExitFrame(Register scratch);
 
   // Load the global proxy from the current context.
@@ -600,6 +604,9 @@ class V8_EXPORT_PRIVATE MacroAssembler
 
   // Abort execution if argument is a smi, enabled via --debug-code.
   void AssertNotSmi(Register object) NOOP_UNLESS_DEBUG_CODE;
+
+  // Abort execution if argument is not a Map, enabled via --debug-code.
+  void AssertMap(Register object, Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
   void AssertFunction(Register object, Register scratch) NOOP_UNLESS_DEBUG_CODE;
@@ -748,7 +755,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ExternalReference thunk_ref, Register thunk_arg,
                               int slots_to_drop_on_return,
                               MemOperand* argc_operand,
-                              MemOperand return_value_operand);
+                              MemOperand return_value_operand,
+                              bool handle_interceptor_result);
 
 #define ACCESS_MASM(masm) masm->
 

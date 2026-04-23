@@ -3,21 +3,27 @@
 // found in the LICENSE file.
 
 @abstract
+@cppObjectLayoutDefinition
 extern class JSCollection extends JSObject {
   // The backing hash table.
   //
   // Use StableOrderedHasSet or StableOrderedHashMap to read.
   table: Object;
 }
+@cppObjectLayoutDefinition
 extern class JSSet extends JSCollection {}
+@cppObjectLayoutDefinition
 extern class JSMap extends JSCollection {}
 
 @abstract
+@cppObjectLayoutDefinition
 extern class JSWeakCollection extends JSObject {
   // The backing hash table mapping keys to values.
   table: Object;
 }
+@cppObjectLayoutDefinition
 extern class JSWeakSet extends JSWeakCollection {}
+@cppObjectLayoutDefinition
 extern class JSWeakMap extends JSWeakCollection {}
 
 @abstract extern class JSMapIterator extends JSCollectionIterator;

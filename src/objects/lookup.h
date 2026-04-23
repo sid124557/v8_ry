@@ -17,6 +17,8 @@
 
 namespace v8::internal {
 
+using JSTransitionableReceiver = UnionOf<JSObject, JSProxy>;
+
 class PropertyKey {
  public:
   inline PropertyKey(Isolate* isolate, double index);
@@ -99,6 +101,9 @@ class V8_EXPORT_PRIVATE LookupIterator final {
     DATA,
     // WasmGC objects are opaque in JS, and appear to have no properties.
     WASM_OBJECT,
+    // The property is being accessed to a deferred module namespace and we need
+    // to trigger evaluation of this module in some accesses.
+    MODULE_NAMESPACE,
 
     // A LookupIterator in the transition state is in the middle of performing
     // a data transition (that is, as part of a data property write, updating
@@ -142,6 +147,9 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   inline LookupIterator(Isolate* isolate, Configuration configuration,
                         DirectHandle<JSAny> receiver,
                         DirectHandle<Symbol> name);
+
+  inline InternalIndex descriptor_number() const;
+  inline InternalIndex dictionary_entry() const;
 
   void Restart() {
     InterceptorState state = InterceptorState::kUninitialized;
@@ -215,13 +223,14 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   /* PROPERTY */
   inline bool ExtendingNonExtensible(DirectHandle<JSReceiver> receiver);
   void PrepareForDataProperty(DirectHandle<Object> value);
-  void PrepareTransitionToDataProperty(DirectHandle<JSReceiver> receiver,
-                                       DirectHandle<Object> value,
-                                       PropertyAttributes attributes,
-                                       StoreOrigin store_origin);
+  void PrepareTransitionToDataProperty(
+      DirectHandle<JSTransitionableReceiver> receiver,
+      DirectHandle<Object> value, PropertyAttributes attributes,
+      StoreOrigin store_origin);
   inline bool IsCacheableTransition();
   V8_WARN_UNUSED_RESULT Maybe<bool> ApplyTransitionToDataProperty(
-      DirectHandle<JSReceiver> receiver, Maybe<ShouldThrow> should_throw);
+      DirectHandle<JSTransitionableReceiver> receiver,
+      Maybe<ShouldThrow> should_throw);
   void ReconfigureDataProperty(DirectHandle<Object> value,
                                PropertyAttributes attributes);
   void Delete();
@@ -246,8 +255,8 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   PropertyLocation location() const { return property_details().location(); }
   PropertyConstness constness() const { return property_details().constness(); }
   FieldIndex GetFieldIndex() const;
-  int GetFieldDescriptorIndex() const;
-  int GetAccessorIndex() const;
+  InternalIndex GetFieldDescriptorIndex() const;
+  InternalIndex GetAccessorIndex() const;
   DirectHandle<PropertyCell> GetPropertyCell() const;
   DirectHandle<Object> GetAccessors() const;
   inline DirectHandle<InterceptorInfo> GetInterceptor() const;
@@ -313,6 +322,7 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   enum class InterceptorState {
     kUninitialized,
     kSkipNonMasking,
+    kSkipNonMaskingOwnProperty,
     kProcessNonMasking
   };
 
@@ -360,8 +370,6 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   bool check_interceptor() const {
     return (configuration_ & kInterceptor) != 0;
   }
-  inline InternalIndex descriptor_number() const;
-  inline InternalIndex dictionary_entry() const;
 
   static inline Configuration ComputeConfiguration(Isolate* isolate,
                                                    Configuration configuration,

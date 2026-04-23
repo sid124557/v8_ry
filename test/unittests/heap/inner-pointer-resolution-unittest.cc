@@ -207,7 +207,8 @@ class InnerPointerResolutionTest
                                               roots.unchecked_fixed_array_map(),
                                               SKIP_WRITE_BARRIER);
         Tagged<FixedArray> arr(Cast<FixedArray>(heap_object));
-        arr->set_length((object.size - FixedArray::SizeFor(0)) / kTaggedSize);
+        arr->set_length(static_cast<uint32_t>(
+            (object.size - FixedArray::SizeFor(0)) / kTaggedSize));
         DCHECK_EQ(object.size, arr->AllocatedSize());
         break;
       }
@@ -706,9 +707,9 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedRegularYoungPages) {
   EXPECT_EQ(page1, allocator->LookupChunkContainingAddress(inner_ptr1));
   EXPECT_EQ(page2, allocator->LookupChunkContainingAddress(inner_ptr2));
   EXPECT_EQ(AllocationSpace::NEW_SPACE,
-            MutablePage::cast(page1->Metadata())->owner_identity());
+            SbxCast<MutablePage>(page1->Metadata())->owner_identity());
   EXPECT_EQ(AllocationSpace::NEW_SPACE,
-            MutablePage::cast(page2->Metadata())->owner_identity());
+            SbxCast<MutablePage>(page2->Metadata())->owner_identity());
   EXPECT_TRUE(v8_flags.minor_ms || page1->IsFromPage());
   EXPECT_TRUE(v8_flags.minor_ms || page2->IsFromPage());
 
@@ -724,9 +725,9 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedRegularYoungPages) {
   // Garbage collection once more.
   InvokeAtomicMinorGC();
   EXPECT_EQ(AllocationSpace::NEW_SPACE,
-            MutablePage::cast(page1->Metadata())->owner_identity());
+            SbxCast<MutablePage>(page1->Metadata())->owner_identity());
   EXPECT_EQ(AllocationSpace::NEW_SPACE,
-            MutablePage::cast(page2->Metadata())->owner_identity());
+            SbxCast<MutablePage>(page2->Metadata())->owner_identity());
   // The two pages should still be around, in the new space.
   EXPECT_EQ(page1, allocator->LookupChunkContainingAddress(inner_ptr1));
   EXPECT_EQ(page2, allocator->LookupChunkContainingAddress(inner_ptr2));
@@ -768,7 +769,7 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedLargeYoungPage) {
     auto page = MemoryChunk::FromHeapObject(obj);
     EXPECT_TRUE(page->Metadata()->is_large());
     EXPECT_EQ(AllocationSpace::NEW_LO_SPACE,
-              MutablePage::cast(page->Metadata())->owner_identity());
+              SbxCast<MutablePage>(page->Metadata())->owner_identity());
     EXPECT_TRUE(v8_flags.minor_ms || page->IsToPage());
 
     // Keep inner pointer.

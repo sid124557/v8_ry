@@ -36,7 +36,6 @@ namespace internal {
 
 constexpr MachineType MachineTypeOf<Smi>::value;
 constexpr MachineType MachineTypeOf<Object>::value;
-constexpr MachineType MachineTypeOf<MaybeObject>::value;
 
 namespace compiler {
 
@@ -413,6 +412,10 @@ TNode<Float64T> CodeAssembler::Float64Constant(double value) {
   return UncheckedCast<Float64T>(jsgraph()->Float64Constant(value));
 }
 
+TNode<Float64T> CodeAssembler::Float64Constant(Float64 value) {
+  return UncheckedCast<Float64T>(jsgraph()->Float64Constant(value));
+}
+
 bool CodeAssembler::IsMapOffsetConstant(Node* node) {
   return raw_assembler()->IsMapOffsetConstant(node);
 }
@@ -652,6 +655,13 @@ void CodeAssembler::ReturnIf(TNode<BoolT> condition, TNode<Object> value) {
 }
 
 void CodeAssembler::AbortCSADcheck(Node* message) {
+#if V8_ENABLE_WEBASSEMBLY
+  if (wasm::BuiltinLookup::IsWasmBuiltinId(builtin())) {
+    // We switch to the central stack for AbortCSADcheck because it requires a
+    // large amount of stack space to push the stack trace.
+    SwitchToTheCentralStackIfNeeded();
+  }
+#endif
   raw_assembler()->AbortCSADcheck(message);
 }
 

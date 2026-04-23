@@ -1311,7 +1311,7 @@ bool CompilationDependencies::DependOnContextCell(ContextRef script_context,
 
 bool CompilationDependencies::DependOnContextCell(ContextCellRef slot,
                                                   ContextCell::State state) {
-  DCHECK(v8_flags.script_context_cells);
+  DCHECK(v8_flags.script_context_cells || v8_flags.function_context_cells);
   RecordDependency(zone_->New<ContextCellDependency>(slot, state));
   return true;
 }
@@ -1363,6 +1363,12 @@ bool CompilationDependencies::DependOnArrayBufferDetachingProtector() {
   return DependOnProtector(MakeRef(
       broker_,
       broker_->isolate()->factory()->array_buffer_detaching_protector()));
+}
+
+bool CompilationDependencies::DependOnArrayBufferMutableProtector() {
+  return DependOnProtector(
+      MakeRef(broker_,
+              broker_->isolate()->factory()->array_buffer_mutable_protector()));
 }
 
 bool CompilationDependencies::DependOnArrayIteratorProtector() {
@@ -1654,6 +1660,13 @@ CompilationDependency const*
 CompilationDependencies::FieldTypeDependencyOffTheRecord(
     MapRef map, MapRef owner, InternalIndex descriptor, ObjectRef type) const {
   return zone_->New<FieldTypeDependency>(map, owner, descriptor, type);
+}
+
+void CompilationDependencies::DependOnFieldRepresentation(
+    MapRef map, MapRef owner, InternalIndex descriptor,
+    Representation representation) {
+  RecordDependency(zone_->New<FieldRepresentationDependency>(
+      map, owner, descriptor, representation));
 }
 
 #ifdef DEBUG

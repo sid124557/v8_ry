@@ -434,6 +434,12 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
     }
   }
 
+  V8_INLINE void RecordCfi(std::string_view comment) {
+    // TODO(olivf): Have a dedicated table for CFI instead of putting it into
+    // the code comments.
+    code_comments_writer_.Add(pc_offset(), "CFI:" + std::string(comment));
+  }
+
 #ifdef V8_CODE_COMMENTS
   class CodeComment {
    public:
@@ -476,6 +482,12 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   // The default buffer size used if we do not know the final size of the
   // generated code.
   static constexpr int kDefaultBufferSize = 4 * KB;
+
+  void RecordJSDispatchHandle(JSDispatchHandle handle, uint16_t argument_count);
+  const std::vector<std::pair<JSDispatchHandle, uint16_t>>&
+  js_dispatch_handles() const {
+    return js_dispatch_handles_;
+  }
 
  protected:
   // Add 'target' to the {code_targets_} vector, if necessary, and return the
@@ -552,6 +564,8 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
                      IndirectHandle<HeapObject>::hash,
                      IndirectHandle<HeapObject>::equal_to>
       embedded_objects_map_;
+
+  std::vector<std::pair<JSDispatchHandle, uint16_t>> js_dispatch_handles_;
 
   const AssemblerOptions options_;
   uint64_t enabled_cpu_features_;

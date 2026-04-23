@@ -30,7 +30,7 @@ extern class ClosureFeedbackCellArray extends HeapObject {
   objects[length]: FeedbackCell;
 }
 
-@generateBodyDescriptor
+@cppObjectLayoutDefinition
 extern class FeedbackVector extends HeapObject {
   const length: int32;
   invocation_count: int32;

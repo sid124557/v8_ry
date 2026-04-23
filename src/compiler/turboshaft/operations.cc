@@ -24,6 +24,7 @@
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/opmasks.h"
+#include "src/flags/flags.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles-inl.h"
 #include "src/objects/code-inl.h"
@@ -32,12 +33,6 @@
 // For InWritableSharedSpace
 #include "src/objects/objects-inl.h"
 #endif
-
-namespace v8::internal {
-std::ostream& operator<<(std::ostream& os, AbortReason reason) {
-  return os << GetAbortReason(reason);
-}
-}  // namespace v8::internal
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -424,6 +419,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOrDeoptOp::Kind kind) {
       return os << "Float64ToInt64";
     case ChangeOrDeoptOp::Kind::kFloat64NotHole:
       return os << "Float64NotHole";
+    case ChangeOrDeoptOp::Kind::kFloat64ToUint64:
+      return os << "Float64ToUint64";
   }
 }
 
@@ -651,7 +648,7 @@ void LoadOp::PrintOptions(std::ostream& os) const {
   os << '[';
   os << (kind.tagged_base ? "tagged base" : "raw");
   if (kind.maybe_unaligned) os << ", unaligned";
-  if (kind.with_trap_handler) os << ", protected";
+  if (kind.with_trap_handler) os << ", trapping";
   if (kind.is_immutable) os << ", immutable";
   os << ", " << loaded_rep;
   os << ", " << result_rep;
@@ -739,9 +736,10 @@ void StoreOp::PrintOptions(std::ostream& os) const {
   os << '[';
   os << (kind.tagged_base ? "tagged base" : "raw");
   if (kind.maybe_unaligned) os << ", unaligned";
-  if (kind.with_trap_handler) os << ", protected";
+  if (kind.with_trap_handler) os << ", trapping";
   os << ", " << stored_rep;
   os << ", " << write_barrier;
+  if (kind.is_atomic) os << ", atomic with memory order " << memory_order_;
   if (element_size_log2 != 0)
     os << ", element size: 2^" << int{element_size_log2};
   if (offset != 0) os << ", offset: " << offset;
@@ -798,6 +796,15 @@ void AllocateOp::PrintOptions(std::ostream& os) const {
 #if V8_ENABLE_SANDBOX
 void LoadExternalPointerOp::PrintOptions(std::ostream& os) const {
   os << '[';
+  os << "tag_range: [" << tag_range.first << ", " << tag_range.last << "]";
+  os << ']';
+}
+#endif
+
+#if V8_ENABLE_SANDBOX
+void LoadTrustedPointerOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  os << "is_immutable: " << is_immutable << ", ";
   os << "tag_range: [" << tag_range.first << ", " << tag_range.last << "]";
   os << ']';
 }
@@ -1115,6 +1122,10 @@ void Word32PairBinopOp::PrintOptions(std::ostream& os) const {
   os << ']';
 }
 
+void Word64MulWideOp::PrintOptions(std::ostream& os) const {
+  os << (kind == Kind::kSigned ? "signed" : "unsigned");
+}
+
 void WordBinopDeoptOnOverflowOp::PrintOptions(std::ostream& os) const {
   os << '[';
   switch (kind) {
@@ -1191,7 +1202,10 @@ std::ostream& operator<<(std::ostream& os, EffectHandler h) {
 std::ostream& operator<<(std::ostream& os, base::Vector<EffectHandler> hs) {
   os << "effect handlers: ";
   for (auto& h : hs) {
-    os << h.tag_index << ":" << h.block << (&h == &hs.last() ? "" : " ");
+    if (h.is_switch())
+      os << h.tag_index() << "[switch]" << (&h == &hs.last() ? "" : " ");
+    else
+      os << h.tag_index() << ":" << h.block << (&h == &hs.last() ? "" : " ");
   }
   return os;
 }
@@ -1435,6 +1449,8 @@ std::ostream& operator<<(
       return os << "Boolean";
     case ConvertJSPrimitiveToUntaggedOp::InputAssumptions::kSmi:
       return os << "Smi";
+    case ConvertJSPrimitiveToUntaggedOp::InputAssumptions::kSmiOrHole:
+      return os << "SmiOrHole";
     case ConvertJSPrimitiveToUntaggedOp::InputAssumptions::kNumberOrHole:
       return os << "NumberOrHole";
     case ConvertJSPrimitiveToUntaggedOp::InputAssumptions::kNumberOrOddball:
@@ -1463,6 +1479,8 @@ std::ostream& operator<<(
 #endif  // V8_ENABLE_UNDEFINED_DOUBLE
     case ConvertJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind::kArrayIndex:
       return os << "ArrayIndex";
+    case ConvertJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind::kUint64:
+      return os << "Uint64";
   }
 }
 
@@ -1510,6 +1528,8 @@ std::ostream& operator<<(
   switch (input_assumptions) {
     case TruncateJSPrimitiveToUntaggedOp::InputAssumptions::kBigInt:
       return os << "BigInt";
+    case TruncateJSPrimitiveToUntaggedOp::InputAssumptions::kSmiOrHole:
+      return os << "SmiOrHole";
     case TruncateJSPrimitiveToUntaggedOp::InputAssumptions::kNumberOrOddball:
       return os << "NumberOrOddball";
     case TruncateJSPrimitiveToUntaggedOp::InputAssumptions::
@@ -1726,6 +1746,7 @@ const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
     case wasm::kI8:
     case wasm::kI16:
     case wasm::kI32:
+    case wasm::kWaitQueue:
       return kWord32;
     case wasm::kI64:
       return kWord64;
@@ -1869,8 +1890,9 @@ void Simd128ExtractLaneOp::PrintOptions(std::ostream& os) const {
   os << ", " << static_cast<int32_t>(lane) << ']';
 }
 
-void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
-  os << '[';
+static void PrintReplaceLaneKind(Simd128ReplaceLaneOp::Kind kind,
+                                 std::ostream& os) {
+  using Kind = Simd128ReplaceLaneOp::Kind;
   switch (kind) {
     case Kind::kI8x16:
       os << "I8x16";
@@ -1894,13 +1916,25 @@ void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
       os << "F64x2";
       break;
   }
+}
+
+void Simd128MoveLaneOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  PrintReplaceLaneKind(kind, os);
+  os << ", " << static_cast<int32_t>(into_lane) << ", "
+     << static_cast<int32_t>(from_lane) << ']';
+}
+
+void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  PrintReplaceLaneKind(kind, os);
   os << ", " << static_cast<int32_t>(lane) << ']';
 }
 
 void Simd128LaneMemoryOp::PrintOptions(std::ostream& os) const {
   os << '[' << (mode == Mode::kLoad ? "Load" : "Store") << ", ";
   if (kind.maybe_unaligned) os << "unaligned, ";
-  if (kind.with_trap_handler) os << "protected, ";
+  if (kind.with_trap_handler) os << "trapping, ";
   switch (lane_kind) {
     case LaneKind::k8:
       os << '8';
@@ -1923,7 +1957,7 @@ void Simd128LaneMemoryOp::PrintOptions(std::ostream& os) const {
 void Simd128LoadTransformOp::PrintOptions(std::ostream& os) const {
   os << '[';
   if (load_kind.maybe_unaligned) os << "unaligned, ";
-  if (load_kind.with_trap_handler) os << "protected, ";
+  if (load_kind.with_trap_handler) os << "trapping, ";
 
   switch (transform_kind) {
 #define PRINT_KIND(kind)       \
@@ -1960,11 +1994,10 @@ void Simd128ShuffleOp::PrintOptions(std::ostream& os) const {
   os << ']';
 }
 
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 void Simd128LoadPairDeinterleaveOp::PrintOptions(std::ostream& os) const {
   os << '[';
   if (load_kind.maybe_unaligned) os << "unaligned, ";
-  if (load_kind.with_trap_handler) os << "protected, ";
+  if (load_kind.with_trap_handler) os << "trapping, ";
 
   switch (kind) {
     case Kind::k8x32:
@@ -1982,7 +2015,6 @@ void Simd128LoadPairDeinterleaveOp::PrintOptions(std::ostream& os) const {
   }
   os << ']';
 }
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
 void Simd256ConstantOp::PrintOptions(std::ostream& os) const {
@@ -1996,7 +2028,7 @@ void Simd256Extract128LaneOp::PrintOptions(std::ostream& os) const {
 void Simd256LoadTransformOp::PrintOptions(std::ostream& os) const {
   os << '[';
   if (load_kind.maybe_unaligned) os << "unaligned, ";
-  if (load_kind.with_trap_handler) os << "protected, ";
+  if (load_kind.with_trap_handler) os << "trapping, ";
 
   switch (transform_kind) {
 #define PRINT_KIND(kind)       \
@@ -2083,7 +2115,8 @@ std::ostream& operator<<(std::ostream& os, Simd256UnpackOp::Kind kind) {
 
 void WasmAllocateArrayOp::PrintOptions(std::ostream& os) const {
   os << '[' << array_type->element_type()
-     << ", is_shared: " << (is_shared ? "true" : "false") << "]";
+     << ", is_shared: " << (is_shared == SharedFlag::kYes ? "true" : "false")
+     << "]";
 }
 
 void StructGetOp::PrintOptions(std::ostream& os) const {
@@ -2110,7 +2143,7 @@ void StructSetOp::PrintOptions(std::ostream& os) const {
   } else {
     os << "non-atomic";
   }
-  os << ']';
+  os << ", " << write_barrier << ']';
 }
 
 void ArrayGetOp::PrintOptions(std::ostream& os) const {
@@ -2132,7 +2165,7 @@ void ArraySetOp::PrintOptions(std::ostream& os) const {
   } else {
     os << "non-atomic";
   }
-  os << ']';
+  os << ", " << write_barrier << ']';
 }
 
 #endif  // V8_ENABLE_WEBASSEBMLY
@@ -2330,6 +2363,9 @@ bool IsUnlikelySuccessor(const Block* block, const Block* successor,
     case Opcode::kTailCall:
     case Opcode::kUnreachable:
     case Opcode::kReturn:
+#if V8_ENABLE_WEBASSEMBLY
+    case Opcode::kWasmTrap:
+#endif
       UNREACHABLE();
 
 #define NON_TERMINATOR_CASE(op) case Opcode::k##op:
@@ -2342,21 +2378,22 @@ bool IsUnlikelySuccessor(const Block* block, const Block* successor,
 bool Operation::IsOnlyUserOf(const Operation& value, const Graph& graph) const {
   DCHECK_GE(std::count(inputs().begin(), inputs().end(), graph.Index(value)),
             1);
-  if (value.saturated_use_count.IsOne()) return true;
-  return std::count(inputs().begin(), inputs().end(), graph.Index(value)) ==
-         value.saturated_use_count.Get();
+  if (value.saturated_use_count.Is(1)) return true;
+  size_t use_count_in_this =
+      std::count(inputs().begin(), inputs().end(), graph.Index(value));
+  return value.saturated_use_count.Is(static_cast<int>(use_count_in_this));
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-bool Operation::IsProtectedLoad() const {
+bool Operation::IsTrappingLoad() const {
   if (const auto* load = TryCast<LoadOp>()) {
     return load->kind.with_trap_handler;
   } else if (const auto* load_t = TryCast<Simd128LoadTransformOp>()) {
     return load_t->load_kind.with_trap_handler;
-#ifdef V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
-  } else if (const auto* load_t = TryCast<Simd128LoadPairDeinterleaveOp>()) {
-    return load_t->load_kind.with_trap_handler;
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+  } else if (const auto* load_pd = TryCast<Simd128LoadPairDeinterleaveOp>()) {
+    return load_pd->load_kind.with_trap_handler;
+  } else if (const auto* load_lane = TryCast<Simd128LaneMemoryOp>()) {
+    return load_lane->kind.with_trap_handler;
   }
   return false;
 }
@@ -2400,6 +2437,17 @@ IsSmiDecision DecideObjectIsSmi(const Graph& graph, V<Object> idx, int depth) {
           return IsSmiDecision::kUnknown;
       }
       UNREACHABLE();
+    }
+    case Opcode::kTaggedBitcast: {
+      switch (op.Cast<TaggedBitcastOp>().kind) {
+        case TaggedBitcastOp::Kind::kSmi:
+          return IsSmiDecision::kTrue;
+        case TaggedBitcastOp::Kind::kHeapObject:
+          return IsSmiDecision::kFalse;
+        case TaggedBitcastOp::Kind::kTagAndSmiBits:
+        case TaggedBitcastOp::Kind::kAny:
+          return IsSmiDecision::kUnknown;
+      }
     }
     case Opcode::kLoad: {
       switch (op.Cast<LoadOp>().loaded_rep) {

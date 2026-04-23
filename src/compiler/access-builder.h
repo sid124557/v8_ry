@@ -158,6 +158,7 @@ class V8_EXPORT_PRIVATE AccessBuilder final
 
   // Provides access to JSArray::length() field.
   static FieldAccess ForJSArrayLength(ElementsKind elements_kind);
+  static FieldAccess ForJSArrayLength();
 
   // Provides access to JSArrayBuffer::bit_field() field.
   static FieldAccess ForJSArrayBufferBitField();
@@ -217,9 +218,6 @@ class V8_EXPORT_PRIVATE AccessBuilder final
 
   // Provides access to JSRegExp::last_index() field.
   static FieldAccess ForJSRegExpLastIndex();
-
-  // Provides access to JSRegExp::source() field.
-  static FieldAccess ForJSRegExpSource();
 
   // Provides access to FixedArray::length() field.
   static FieldAccess ForFixedArrayLength();
@@ -326,7 +324,8 @@ class V8_EXPORT_PRIVATE AccessBuilder final
 
   // Provides access to PropertyArray slots.
   static FieldAccess ForPropertyArraySlot(int index,
-                                          Representation representation);
+                                          Representation representation,
+                                          bool can_optimize_smis);
 
   // Provides access to ScopeInfo flags.
   static FieldAccess ForScopeInfoFlags();

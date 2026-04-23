@@ -5,7 +5,9 @@
 // Flags: --turbolev-inline-js-wasm-wrappers --turboshaft-wasm-in-js-inlining
 // Flags: --turbolev --no-maglev
 // Flags: --trace-turbo-inlining --trace-deopt
+// Flags: --no-log-colour --no-trace-with-compilation-id
 // Flags: --allow-natives-syntax --no-stress-incremental-marking
+// Flags: --no-stress-flush-code
 
 // Test case for JS-to-Wasm wrapper inlining in Turbolev with tracing output.
 // Note that there is a variant for 32 bit and 64 bit, since the Wasm-into-JS

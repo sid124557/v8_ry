@@ -81,7 +81,7 @@ void JsonPrintBytecodeSource(std::ostream& os, int source_id,
   os << ", \"feedbackVector\": \"";
   if (!feedback_vector.is_null()) {
     std::stringstream stream;
-    FeedbackVector::Print(feedback_vector, stream);
+    Print(feedback_vector, stream);
     std::regex newlines_re("\n+");
     os << std::regex_replace(stream.str(), newlines_re, "\\n");
   }
@@ -334,20 +334,17 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
       if (str->length() > 0) {
         SNPrintF(source_file, "%s", str->ToCString().get());
         std::replace(source_file.begin(),
-                     source_file.begin() + source_file.length(), '/', '_');
+                     source_file.begin() + source_file.size(), '/', '_');
         source_available = true;
       }
     }
   }
-  std::replace(filename.begin(), filename.begin() + filename.length(), ' ',
-               '_');
-  std::replace(filename.begin(), filename.begin() + filename.length(), ':',
-               '-');
+  std::replace(filename.begin(), filename.begin() + filename.size(), '/', '_');
+  std::replace(filename.begin(), filename.begin() + filename.size(), ' ', '_');
+  std::replace(filename.begin(), filename.begin() + filename.size(), ':', '-');
 #if V8_OS_WIN
-  std::replace(filename.begin(), filename.begin() + filename.length(), '<',
-               '{');
-  std::replace(filename.begin(), filename.begin() + filename.length(), '>',
-               '}');
+  std::replace(filename.begin(), filename.begin() + filename.size(), '<', '{');
+  std::replace(filename.begin(), filename.begin() + filename.size(), '>', '}');
 #endif  // V8_OS_WIN
 
   base::EmbeddedVector<char, 256> base_dir;
@@ -373,9 +370,9 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
              source_file.begin(), phase, suffix);
   }
 
-  char* buffer = new char[full_filename.length() + 1];
-  memcpy(buffer, full_filename.begin(), full_filename.length());
-  buffer[full_filename.length()] = '\0';
+  char* buffer = new char[full_filename.size() + 1];
+  memcpy(buffer, full_filename.begin(), full_filename.size());
+  buffer[full_filename.size()] = '\0';
   return std::unique_ptr<char[]>(buffer);
 }
 

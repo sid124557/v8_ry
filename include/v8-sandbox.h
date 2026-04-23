@@ -81,16 +81,6 @@ class SandboxHardwareSupport {
    * hardware permissions to the memory that will be inherited on clone.
    */
   V8_EXPORT static void InitializeBeforeThreadCreation();
-
-  /**
-   * Prepares the current thread for executing sandboxed code.
-   *
-   * This must be called on newly created threads before they execute any
-   * sandboxed code (in particular any JavaScript or WebAssembly code). It
-   * should not be invoked on threads that never execute sandboxed code,
-   * although it is fine to do so from a security point of view.
-   */
-  V8_EXPORT static void PrepareCurrentThreadForHardwareSandboxing();
 };
 
 namespace internal {
@@ -99,7 +89,7 @@ namespace internal {
 V8_INLINE static Address* GetCppHeapPointerTableBase(v8::Isolate* isolate) {
   Address addr = reinterpret_cast<Address>(isolate) +
                  Internals::kIsolateCppHeapPointerTableOffset +
-                 Internals::kExternalPointerTableBasePointerOffset;
+                 Internals::kExternalEntityTableBasePointerOffset;
   return *reinterpret_cast<Address**>(addr);
 }
 #endif  // V8_COMPRESS_POINTERS
@@ -108,7 +98,7 @@ template <typename T>
 V8_INLINE static T* ReadCppHeapPointerField(v8::Isolate* isolate,
                                             Address heap_object_ptr, int offset,
                                             CppHeapPointerTagRange tag_range) {
-  // This is a specialized version of the the CppHeapPointerTable accessors
+  // This is a specialized version of the CppHeapPointerTable accessors
   // which (1) allows the code to be inlined into the callers for performance
   // and (2) is optimized for code size as there are a huge number of callers
   // from auto-generated bindings code.

@@ -100,39 +100,8 @@ TEST(Heap, GenerationSizesFromHeapSize) {
   }
 }
 
-void AssertLowMemoryOldGenerationSizeFromPhysicalMemory(
-    uint64_t physical_memory) {
-  ASSERT_EQ(128 * i::Heap::HeapLimitMultiplier(physical_memory) * MB,
-            i::Heap::OldGenerationSizeFromPhysicalMemory(physical_memory));
-}
-
-void AssertHighMemoryOldGenerationSizeFromPhysicalMemory(
-    uint64_t physical_memory, size_t adjust) {
-  // The expected value is old_generation_size + semi_space_multiplier *
-  // semi_space_size.
-
-  ASSERT_EQ(i::Heap::DefaultMaxHeapSize(physical_memory) / adjust,
-            i::Heap::OldGenerationSizeFromPhysicalMemory(physical_memory));
-}
-
-TEST(Heap, OldGenerationSizeFromPhysicalMemory) {
-  // Low memory
-  AssertLowMemoryOldGenerationSizeFromPhysicalMemory(0);
-  AssertLowMemoryOldGenerationSizeFromPhysicalMemory(512u * MB);
-
-  // High memory
-  AssertHighMemoryOldGenerationSizeFromPhysicalMemory(
-      static_cast<uint64_t>(1) * GB, 4);
-  AssertHighMemoryOldGenerationSizeFromPhysicalMemory(
-      static_cast<uint64_t>(2) * GB, 2);
-  AssertHighMemoryOldGenerationSizeFromPhysicalMemory(
-      static_cast<uint64_t>(4) * GB, 1);
-  AssertHighMemoryOldGenerationSizeFromPhysicalMemory(
-      static_cast<uint64_t>(8) * GB, 1);
-}
-
 TEST(Heap, LimitsComputationBoundariesClamp) {
-  using Boundaries = Heap::LimitBounds;
+  using Boundaries = HeapLimitBounds;
   Boundaries boundaries;
   boundaries.minimum_old_generation_allocation_limit = 100u;
   boundaries.maximum_old_generation_allocation_limit = 200u;
@@ -149,7 +118,7 @@ TEST(Heap, LimitsComputationBoundariesClamp) {
 }
 
 TEST(Heap, LimitsComputationBoundariesAtLeastAndAtMost) {
-  Heap::LimitBounds boundaries;
+  HeapLimitBounds boundaries;
   boundaries.maximum_old_generation_allocation_limit = 200u;
   boundaries.maximum_global_allocation_limit = 400u;
 
@@ -179,13 +148,13 @@ TEST_F(HeapTest, LimitsComputationBoundariesConstruction) {
   Heap* heap = i_isolate()->heap();
 
   const size_t kSizeMax = std::numeric_limits<size_t>::max();
-  Heap::LimitBounds no_boundaries;
+  HeapLimitBounds no_boundaries;
   EXPECT_EQ(0u, no_boundaries.minimum_old_generation_allocation_limit);
   EXPECT_EQ(0u, no_boundaries.minimum_global_allocation_limit);
   EXPECT_EQ(kSizeMax, no_boundaries.maximum_old_generation_allocation_limit);
   EXPECT_EQ(kSizeMax, no_boundaries.maximum_global_allocation_limit);
 
-  Heap::LimitBounds at_least = Heap::LimitBounds::AtLeastCurrentLimits(heap);
+  HeapLimitBounds at_least = heap->limits()->AtLeastCurrentLimits();
   EXPECT_EQ(heap->OldGenerationAllocationLimitForTesting(),
             at_least.minimum_old_generation_allocation_limit);
   EXPECT_EQ(heap->GlobalAllocationLimitForTesting(),
@@ -193,7 +162,7 @@ TEST_F(HeapTest, LimitsComputationBoundariesConstruction) {
   EXPECT_EQ(kSizeMax, at_least.maximum_old_generation_allocation_limit);
   EXPECT_EQ(kSizeMax, at_least.maximum_global_allocation_limit);
 
-  Heap::LimitBounds at_most = Heap::LimitBounds::AtMostCurrentLimits(heap);
+  HeapLimitBounds at_most = heap->limits()->AtMostCurrentLimits();
   EXPECT_EQ(heap->OldGenerationAllocationLimitForTesting(),
             at_most.maximum_old_generation_allocation_limit);
   EXPECT_EQ(heap->GlobalAllocationLimitForTesting(),
@@ -221,6 +190,7 @@ std::pair<size_t, size_t> HeapLimitsForPhysicalMemory(
 
 TEST_F(HeapTest, ExpectedDefaultGenerationLimitsForPhysicalMemory) {
   if (v8_flags.max_semi_space_size != 0) return;
+  v8_flags.new_old_generation_heap_size = false;
 
   struct OldLimit {
     uint64_t physical_memory;
@@ -349,6 +319,8 @@ TEST_F(HeapTest, ExpectedNewGenerationLimitsForPhysicalMemory) {
     uint64_t physical_memory;
     // Max old generation allocation limit for 32-bit.
     uint64_t arch_32bit;
+    // Max old generation allocation limit for 64-bit Android.
+    uint64_t arch_64bit_android;
     // Max old generation allocation limit for 64-bit.
     uint64_t arch_64bit;
   };
@@ -382,19 +354,19 @@ TEST_F(HeapTest, ExpectedNewGenerationLimitsForPhysicalMemory) {
 
   // Expected old generation limits.
   std::vector<OldLimit> old_limits = {
-      {512 * kMB, 256 * kMB, 256 * kMB},
-      {1 * kGB, 256 * kMB, 512 * kMB},
-      {1536 * kMB, 384 * kMB, 768 * kMB},
-      {2 * kGB, 512 * kMB, 1 * kGB},
-      {3 * kGB, 768 * kMB, 1536 * kMB},
-      {4 * kGB, kGB, 2 * kGB},
-      {6 * kGB, kGB, 3 * kGB},
-      {8 * kGB - 1, kGB, 4 * kGB},
-      {8 * kGB, kGB, 4 * kGB},
-      {15 * kGB - 1, kGB, 4 * kGB},
-      {15 * kGB, kGB, 4 * kGB},
-      {16 * kGB, kGB, 4 * kGB},
-      {32 * kGB, kGB, 4 * kGB},
+      {512 * kMB, 256 * kMB, 256 * kMB, 256 * kMB},
+      {1 * kGB, 256 * kMB, 256 * kMB, 512 * kMB},
+      {1536 * kMB, 384 * kMB, 384 * kMB, 768 * kMB},
+      {2 * kGB, 512 * kMB, 512 * kMB, 1 * kGB},
+      {3 * kGB, 768 * kMB, 768 * kMB, 1536 * kMB},
+      {4 * kGB, kGB, kGB, 2 * kGB},
+      {6 * kGB, kGB, 1 * kGB + 512 * kMB, 3 * kGB},
+      {8 * kGB - 1, kGB, 2 * kGB, 4 * kGB},
+      {8 * kGB, kGB, 2 * kGB, 4 * kGB},
+      {15 * kGB - 1, kGB, 3 * kGB + 768 * kMB, 4 * kGB},
+      {15 * kGB, kGB, 3 * kGB + 768 * kMB, 4 * kGB},
+      {16 * kGB, kGB, 4 * kGB, 4 * kGB},
+      {32 * kGB, kGB, 4 * kGB, 4 * kGB},
   };
 
   EXPECT_EQ(young_limits.size(), old_limits.size());
@@ -421,6 +393,8 @@ TEST_F(HeapTest, ExpectedNewGenerationLimitsForPhysicalMemory) {
 
 #if defined(V8_TARGET_ARCH_32_BIT)
     const uint64_t expected_old = old_limit.arch_32bit;
+#elif V8_OS_ANDROID
+    const uint64_t expected_old = old_limit.arch_64bit_android;
 #else
     const uint64_t expected_old = old_limit.arch_64bit;
 #endif
@@ -808,8 +782,9 @@ TEST_F(HeapTest, Regress978156) {
   SimulateFullSpace(heap->new_space(), &arrays);
   // 3. Trim the last array by one word thus creating a one-word filler.
   DirectHandle<FixedArray> last = arrays.back();
-  CHECK_GT(last->length(), 0);
-  heap->RightTrimArray(*last, last->length() - 1, last->length());
+  const uint32_t last_len = last->length().value();
+  CHECK_GT(last_len, 0);
+  heap->RightTrimArray(*last, last_len - 1, last_len);
   // 4. Get the last filler on the page.
   Tagged<HeapObject> filler = HeapObject::FromAddress(
       MutablePage::FromHeapObject(isolate(), *last)->area_end() - kTaggedSize);
@@ -976,7 +951,7 @@ TEST_F(HeapTest, BlackAllocatedPages) {
   EXPECT_FALSE(in_free_list(page, next));
 
   // The page allocated before incremental marking is not black.
-  EXPECT_FALSE(page->Chunk()->IsBlackAllocatedPage());
+  EXPECT_FALSE(page->is_black_allocated());
 
   // Allocate a new object on a BLACK_ALLOCATED page.
   arr = iso->factory()->NewFixedArray(1, AllocationType::kOld);
@@ -984,13 +959,13 @@ TEST_F(HeapTest, BlackAllocatedPages) {
 
   // Expect the page to be black.
   page = NormalPage::FromHeapObject(*arr);
-  EXPECT_TRUE(page->Chunk()->IsBlackAllocatedPage());
+  EXPECT_TRUE(page->is_black_allocated());
 
   // Invoke GC.
   InvokeMajorGC();
 
   // The page is not black now.
-  EXPECT_FALSE(page->Chunk()->IsBlackAllocatedPage());
+  EXPECT_FALSE(page->is_black_allocated());
   // After the GC the next free-space object must be in freelist.
   EXPECT_TRUE(in_free_list(page, next));
 }
@@ -1017,6 +992,33 @@ TEST_F(HeapTest, ContainsSlow) {
   CHECK(heap->lo_space()->ContainsSlow(
       MemoryChunk::FromAddress(large_arr->address())->address()));
   CHECK(!heap->lo_space()->ContainsSlow(0));
+}
+
+TEST_F(HeapTest, ReadOnlySpaceContainsSlowRejectsAddressPastAreaEnd) {
+  // After ShrinkToHighWaterMark, memory past area_end is decommitted,
+  // so reporting it as "contained" simply because it's within the chunk
+  // can be incorrect and lead to crashes when callers dereference it.
+  Heap* heap = isolate()->heap();
+  ReadOnlySpace* ro_space = heap->read_only_space();
+  const auto& pages = ro_space->pages();
+  CHECK(!pages.empty());
+
+  for (ReadOnlyPage* page : pages) {
+    Address area_start = page->area_start();
+    Address area_end = page->area_end();
+    Address chunk_end = page->ChunkAddress() + kRegularPageSize;
+
+    // Addresses within the committed area must be reported as contained.
+    CHECK(ro_space->ContainsSlow(area_start));
+    CHECK(ro_space->ContainsSlow(area_end - 1));
+
+    // Addresses past area_end but still within the original chunk range must
+    // NOT be reported as contained — that memory may be decommitted.
+    if (area_end < chunk_end) {
+      CHECK(!ro_space->ContainsSlow(area_end));
+      CHECK(!ro_space->ContainsSlow(chunk_end - 1));
+    }
+  }
 }
 
 TEST_F(

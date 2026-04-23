@@ -24,6 +24,10 @@
 #include "src/sandbox/hardware-support.h"
 #include "src/utils/allocation.h"
 
+#if V8_OS_LINUX
+#include <sys/mman.h>
+#endif
+
 namespace v8::internal {
 
 size_t MemoryAllocator::commit_page_size_ = 0;
@@ -147,6 +151,14 @@ Address MemoryAllocator::AllocateAlignedMemory(
   }
 
   Address base = reservation.address();
+
+#if V8_OS_LINUX
+  // The sandbox reservation is marked MADV_DONTDUMP so that its multi-TB
+  // virtual range doesn't force the kernel to walk the whole thing on crash.
+  // Re-mark committed heap chunks as dumpable so crash investigations still
+  // see live objects. Harmless no-op for chunks outside the sandbox.
+  madvise(reinterpret_cast<void*>(base), chunk_size, MADV_DODUMP);
+#endif
 
   if (executable == EXECUTABLE) {
     ThreadIsolation::RegisterJitPage(base, chunk_size);
@@ -275,31 +287,28 @@ void MemoryAllocator::UnregisterSharedMemoryChunk(BasePage* chunk) {
   size_ -= size;
 }
 
-void MemoryAllocator::UnregisterMemoryChunk(BasePage* chunk_metadata) {
-  MemoryChunk* chunk = chunk_metadata->Chunk();
-  DCHECK(!chunk_metadata->is_unregistered());
-  VirtualMemory* reservation = chunk_metadata->reserved_memory();
+void MemoryAllocator::UnregisterMemoryChunk(BasePage* base_page) {
+  MemoryChunk* chunk = base_page->Chunk();
+  DCHECK(!base_page->is_unregistered());
+  VirtualMemory* reservation = base_page->reserved_memory();
   const size_t size =
-      reservation->IsReserved() ? reservation->size() : chunk_metadata->size();
+      reservation->IsReserved() ? reservation->size() : base_page->size();
   DCHECK_GE(size_, static_cast<size_t>(size));
 
   size_ -= size;
-  if (chunk_metadata->is_executable()) {
+  if (base_page->is_executable()) {
     DCHECK_GE(size_executable_, size);
     size_executable_ -= size;
 #ifdef DEBUG
-    UnregisterExecutableMemoryChunk(static_cast<MutablePage*>(chunk_metadata));
+    UnregisterExecutableMemoryChunk(static_cast<MutablePage*>(base_page));
 #endif  // DEBUG
 
-    ThreadIsolation::UnregisterJitPage(chunk->address(),
-                                       chunk_metadata->size());
+    ThreadIsolation::UnregisterJitPage(chunk->address(), base_page->size());
   }
   // For non-RO pages we want to set them as UNREGISTERED to allow actually
   // freeing them.
-  if (!chunk->InReadOnlySpace()) {
-    // Cannot use MutablePage::cast() because that relies on having an
-    // owner() which is unsed at this point.
-    reinterpret_cast<MutablePage*>(chunk_metadata)->set_is_unregistered();
+  if (MutablePage* page; TryCast<MutablePage>(base_page, &page)) {
+    page->set_is_unregistered();
   }
 }
 
@@ -385,7 +394,7 @@ void MemoryAllocator::Free(MemoryAllocator::FreeMode mode,
       // out of the pool again.
       DCHECK(page_metadata->IsLivenessClear());
       DCHECK_EQ(page_metadata->size(),
-                static_cast<size_t>(MutablePage::kPageSize));
+                static_cast<size_t>(NormalPage::kPageSize));
       DCHECK(!page_metadata->is_executable());
 #endif  // DEBUG
       if (auto* pool = memory_pool()) {
@@ -600,7 +609,7 @@ MemoryAllocator::AllocateUninitializedPageFromDelayedOrPool(Space* space) {
   if (!maybe_result.has_value()) {
     return {};
   }
-  const int size = MutablePage::kPageSize;
+  const int size = NormalPage::kPageSize;
   const Address start = maybe_result->uninitialized_chunk.begin();
   // Pooled pages are always regular data pages.
   DCHECK_NE(CODE_SPACE, space->identity());
@@ -705,8 +714,6 @@ const MemoryChunk* MemoryAllocator::LookupChunkContainingAddressInSafepoint(
   // Check if it corresponds to a known normal or large page.
   if (auto normal_page_it = normal_pages_.find(chunk);
       normal_page_it != normal_pages_.end()) {
-    // The chunk is a normal page.
-    // auto* normal_page = NormalPage::cast(chunk);
     DCHECK_LE((*normal_page_it)->address(), addr);
     // This code can run from the shared heap isolate and the slot may point
     // into a client heap isolate, so ignore the isolate check.

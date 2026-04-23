@@ -362,6 +362,13 @@ class V8_BASE_EXPORT OS {
   static void SetDataReadOnly(void* address, size_t size);
 
  private:
+  // Assign a name to a memory region.
+  //
+  // For example on Linux, if the kernel supports this, the name will
+  // afterwards show up in /proc/$pid/maps.
+  static bool SetMemoryRegionName(const void* address, size_t size,
+                                  const char* name);
+
   static int GetCurrentThreadIdInternal();
 
   // These classes use the private memory management API below.
@@ -491,6 +498,10 @@ class V8_BASE_EXPORT AddressSpaceReservation {
   V8_WARN_UNUSED_RESULT bool DiscardSystemPages(void* address, size_t size);
 
   V8_WARN_UNUSED_RESULT bool DecommitPages(void* address, size_t size);
+
+  bool SetName(const char* name) {
+    return OS::SetMemoryRegionName(base_, size_, name);
+  }
 
   V8_WARN_UNUSED_RESULT std::optional<AddressSpaceReservation>
   CreateSubReservation(void* address, size_t size,
@@ -629,10 +640,15 @@ class V8_BASE_EXPORT Thread {
   PlatformData* data() { return data_; }
   Priority priority() const { return priority_; }
 
-  void NotifyStartedAndRun() {
+  virtual void NotifyStartedAndDispatch() {
     if (start_semaphore_) start_semaphore_->Signal();
-    Run();
+    Dispatch();
   }
+
+ protected:
+  // The default implementation simply calls Run().
+  // This can be overridden to perform initialization before Run() is called.
+  virtual void Dispatch() { Run(); }
 
  private:
   void set_name(const char* name);
@@ -666,6 +682,16 @@ class V8_BASE_EXPORT Stack {
 
   // Gets the start of the stack of the current thread.
   static StackSlot GetStackStart();
+
+  // On Windows, the TEB's StackLimit changes during execution as the stack
+  // grows. So do not cache it like we do for the stack start, but expose
+  // functions to explicitly save it and restore it as needed. Used by wasm JSPI
+  // / stack switching to switch to and from the central stack.
+  static void SaveStackLimit();
+  static StackSlot GetStackLimit();
+
+  // Sets the TEB's StackLimit and StackBase on Windows.
+  static void SetCurrentThreadStackBounds(uintptr_t limit, uintptr_t base);
 
   // Returns the current stack top. Works correctly with ASAN and SafeStack.
   //
@@ -713,6 +739,7 @@ class V8_BASE_EXPORT Stack {
   // Return the current thread stack start pointer.
   static StackSlot GetStackStartUnchecked();
   static Stack::StackSlot ObtainCurrentThreadStackStart();
+  static Stack::StackSlot ObtainCurrentThreadStackLimit();
 
   friend class heap::base::Stack;
 };

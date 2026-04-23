@@ -92,8 +92,11 @@ void ImplementationVisitor::BeginGeneratedFiles() {
     {
       cpp::File& file = streams.csa_cc;
 
-      for (const std::string& include_path : GlobalContext::CppIncludes()) {
-        file << "#include " << StringLiteralQuote(include_path) << "\n";
+      for (const CppInclude& include : GlobalContext::CppIncludes()) {
+        if (include.csa_selected()) {
+          file << "#include " << StringLiteralQuote(include.include_path)
+               << "\n";
+        }
       }
       file << "#include \"src/codegen/code-stub-assembler-inl.h\"\n";
 
@@ -289,7 +292,7 @@ class ImplementationVisitor::MacroInliningScope {
 VisitResult ImplementationVisitor::InlineMacro(
     Macro* macro, std::optional<LocationReference> this_reference,
     const std::vector<VisitResult>& arguments,
-    const std::vector<Block*> label_blocks) {
+    const std::vector<Block*>& label_blocks) {
   MacroInliningScope macro_inlining_scope(this, macro);
   CurrentScope::Scope current_scope(macro);
   BindingsManagersScope bindings_managers_scope;
@@ -595,6 +598,13 @@ void ImplementationVisitor::Visit(Builtin* builtin) {
   CurrentScope::Scope current_scope(builtin);
   CurrentCallable::Scope current_callable(builtin);
   CurrentReturnValue::Scope current_return_value;
+
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+  if (builtin->SupportsTSA()) {
+    // TSAGenerator has emitted this builtin's implementation.
+    return;
+  }
+#endif  // V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
 
   const std::string& name = builtin->ExternalName();
   const Signature& signature = builtin->signature();
@@ -3649,17 +3659,27 @@ void ImplementationVisitor::GenerateBuiltinDefinitionsAndInterfaceDescriptors(
     IncludeGuardScope builtin_definitions_include_guard(
         builtin_definitions, builtin_definitions_file_name);
 
-    builtin_definitions
-        << "\n"
-           "#define BUILTIN_LIST_FROM_TORQUE(CPP, TFJ, TFC, TFS, TFH, "
-           "ASM) "
-           "\\\n";
+    builtin_definitions << "\n"
+                           "#define BUILTIN_LIST_FROM_TORQUE(CPP, TFJ_TSA, "
+                           "TFJ, TFC_TSA, TFC, TFS, TFH, "
+                           "ASM) "
+                           "\\\n";
     for (auto& declarable : GlobalContext::AllDeclarables()) {
       Builtin* builtin = Builtin::DynamicCast(declarable.get());
       if (!builtin || builtin->IsExternal()) continue;
       if (builtin->IsStub()) {
-        builtin_definitions << "TFC(" << builtin->ExternalName() << ", "
-                            << builtin->ExternalName();
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+        if (builtin->SupportsTSA()) {
+          builtin_definitions << "TFC_TSA(" << builtin->ExternalName() << ", "
+                              << builtin->ExternalName();
+        } else {
+#endif  // V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+          builtin_definitions << "TFC(" << builtin->ExternalName() << ", "
+                              << builtin->ExternalName();
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+        }
+#endif  // V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+
         if (!builtin->HasCustomInterfaceDescriptor()) {
           std::string descriptor_name = builtin->ExternalName() + "Descriptor";
           bool has_context_parameter =
@@ -3711,7 +3731,15 @@ void ImplementationVisitor::GenerateBuiltinDefinitionsAndInterfaceDescriptors(
           interface_descriptors << "};\n\n";
         }
       } else {
-        builtin_definitions << "TFJ(" << builtin->ExternalName();
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+        if (builtin->SupportsTSA()) {
+          builtin_definitions << "TFJ_TSA(" << builtin->ExternalName();
+        } else {
+#endif  // V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+          builtin_definitions << "TFJ(" << builtin->ExternalName();
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+        }
+#endif  // V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
         if (builtin->IsVarArgsJavaScript()) {
           builtin_definitions << ", kDontAdaptArgumentsSentinel";
         } else {
@@ -3922,8 +3950,7 @@ class FieldOffsetsGenerator {
   bool header_size_emitted_ = false;
 };
 
-void GenerateClassExport(const ClassType* type, std::ostream& header,
-                         std::ostream& inl_header) {
+void GenerateClassExport(const ClassType* type, std::ostream& header) {
   const ClassType* super = type->GetSuperClass();
   std::string parent = "TorqueGenerated" + type->name() + "<" + type->name() +
                        ", " + super->name() + ">";
@@ -3934,7 +3961,6 @@ void GenerateClassExport(const ClassType* type, std::ostream& header,
   }
   header << "  TQ_OBJECT_CONSTRUCTORS(" << type->name() << ")\n";
   header << "};\n\n";
-  inl_header << "TQ_OBJECT_CONSTRUCTORS_IMPL(" << type->name() << ")\n";
 }
 
 }  // namespace
@@ -4031,12 +4057,14 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
  public:
   ClassFieldOffsetGenerator(std::ostream& header, std::ostream& inline_header,
                             const ClassType* type, std::string gen_name,
-                            const ClassType* parent, bool use_templates = true)
+                            const ClassType* parent, bool use_templates = true,
+                            bool for_cpp_object_layout = false)
       : FieldOffsetsGenerator(type),
         hdr_(header),
         inl_(inline_header),
         previous_field_end_(FirstFieldStart(type, parent, use_templates)),
-        gen_name_(gen_name) {}
+        gen_name_(gen_name),
+        for_cpp_object_layout_(for_cpp_object_layout) {}
 
   void WriteField(const Field& f, const std::string& size_string) override {
     hdr_ << "  // " << f.pos << "\n";
@@ -4053,6 +4081,17 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
     // A static constexpr int is more convenient than a getter if the offset is
     // known.
     DCHECK(!f.offset.has_value());
+
+    // Only reached for fields with runtime-computed (conditional-slice)
+    // offsets -- e.g. ScopeInfo's `module_variable_count?` or indexed
+    // fields whose length is a flag-controlled Smi.
+    //
+    // For a cpp-layout class the getter Torque would emit here is a
+    // method on `TorqueGeneratedFoo<D, P>`, which @cppObjectLayoutDefinition
+    // strips. The hand-rolled C++ side provides its own Foo...Offset()
+    // accessors (see e.g. ModuleVariableCountOffset in scope-info.cc), so
+    // we simply skip emission.
+    if (for_cpp_object_layout_) return;
 
     std::string function_name = CamelifyString(f.name_and_type.name) + "Offset";
 
@@ -4085,7 +4124,12 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
       // HeapObject) being mirrored by a *Layout class. Remove once
       // everything is ported to layout classes.
       if (parent_name == "HeapObject" || parent_name == "TrustedObject" ||
-          parent_name == "ExposedTrustedObject" || parent_name == "Struct") {
+          parent_name == "ExposedTrustedObject" ||
+          parent_name == "JSReceiver" || parent_name == "JSObject" ||
+          parent_name == "JSObjectWithEmbedderSlots" ||
+          parent_name == "JSAPIObjectWithEmbedderSlots" ||
+          parent_name == "JSCustomElementsObject" ||
+          parent_name == "JSSpecialObject") {
         parent_name += "Layout";
       }
 
@@ -4102,6 +4146,7 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
   std::ostream& inl_;
   std::string previous_field_end_;
   std::string gen_name_;
+  bool for_cpp_object_layout_ = false;
 };
 
 class CppClassGenerator {
@@ -4293,8 +4338,8 @@ void CppClassGenerator::GenerateClass() {
               !type_->IsSubtypeOf(TypeOracle::GetJSObjectType()))) {
     cpp::Function f(&c, "SizeFor");
     f.SetReturnType("int32_t");
-    f.SetFlags(cpp::Function::kStatic | cpp::Function::kConstexpr |
-               cpp::Function::kV8Inline);
+    f.SetFlags({cpp::Function::kStatic, cpp::Function::kConstexpr,
+                cpp::Function::kV8Inline});
     for (const Field& field : *index_fields) {
       f.AddParameter("int", field.name_and_type.name);
     }
@@ -4360,7 +4405,7 @@ void CppClassGenerator::GenerateClass() {
       parent = (*parent)->parent()->ClassSupertype();
     }
 
-    GenerateClassExport(type_, hdr_, inl_);
+    GenerateClassExport(type_, hdr_);
   }
 }
 
@@ -4397,21 +4442,47 @@ void CppClassGenerator::GenerateCppObjectLayoutDefinitionAsserts() {
         << "class " << gen_name_ << "Asserts {\n";
 
   ClassFieldOffsetGenerator g(impl_, impl_, type_, gen_name_,
-                              type_->GetSuperClass(), false);
+                              type_->GetSuperClass(),
+                              /*use_templates=*/false,
+                              /*for_cpp_object_layout=*/true);
+  bool first_indexed_field_emitted = false;
   for (const auto& f : type_->fields()) {
     CurrentSourcePosition::Scope scope(f.pos);
+    // For cpp-layout classes a single FLEXIBLE_ARRAY_MEMBER represents the
+    // first variable-length tail. Subsequent variable-length fields share
+    // that tail (with dynamic offsets), so don't attempt to generate their
+    // constexpr offsets or verifier static_asserts.
+    if (f.index.has_value() && !f.index_is_constant) {
+      if (first_indexed_field_emitted) continue;
+      first_indexed_field_emitted = true;
+    }
     g.RecordOffsetFor(f);
   }
   g.Finish();
   impl_ << "\n";
 
+  first_indexed_field_emitted = false;
   for (const auto& f : type_->fields()) {
+    // Fields with conditional (runtime-computed) offsets have no Torque-
+    // generated kFooOffset constant, so there's nothing to assert against
+    // the C++ layout. They are asserted at runtime via DCHECKs in the
+    // hand-rolled conditional-slice accessors.
+    if (!f.offset.has_value()) continue;
+    // Struct-typed fields are split into their component members in C++
+    // (for example PositionInfo -> position_info_start_,
+    // position_info_end_), so there's no single member to take offsetof
+    // of.
+    if (f.name_and_type.type->IsStructType()) continue;
+    bool is_indexed = f.index.has_value() && !f.index_is_constant;
+    if (is_indexed) {
+      if (first_indexed_field_emitted) continue;
+      first_indexed_field_emitted = true;
+    }
     std::string field_offset =
         "k" + CamelifyString(f.name_and_type.name) + "Offset";
     std::string cpp_field_offset =
-        f.index.has_value()
-            ? "OFFSET_OF_DATA_START(" + name_ + ")"
-            : "offsetof(" + name_ + ", " + f.name_and_type.name + "_)";
+        is_indexed ? "OFFSET_OF_DATA_START(" + name_ + ")"
+                   : "offsetof(" + name_ + ", " + f.name_and_type.name + "_)";
     impl_ << "  static_assert(" << field_offset << " == " << cpp_field_offset
           << ",\n"
           << "                \"Value of " << name_ << "::" << field_offset
@@ -4449,14 +4520,6 @@ void CppClassGenerator::GenerateClassConstructors() {
   hdr_ << "  inline explicit constexpr " << gen_name_
        << "(Address ptr, typename P::SkipTypeCheckTag\n)";
   hdr_ << "    : P(ptr, typename P::SkipTypeCheckTag{}) {}\n";
-  hdr_ << "  inline explicit " << gen_name_ << "(Address ptr);\n";
-
-  inl_ << "template<class D, class P>\n";
-  inl_ << "inline " << gen_name_T_ << "::" << gen_name_ << "(Address ptr)\n";
-  inl_ << "    : P(ptr) {\n";
-  inl_ << "  SLOW_DCHECK(Is" << typecheck_type->name()
-       << "_NonInline(*this));\n";
-  inl_ << "}\n";
 }
 
 namespace {
@@ -5022,7 +5085,7 @@ namespace {
 void GeneratePrintDefinitionsForClass(std::ostream& impl, const ClassType* type,
                                       const std::string& gen_name,
                                       const std::string& gen_name_T,
-                                      const std::string template_params) {
+                                      const std::string& template_params) {
   impl << template_params << "\n";
   impl << "void " << gen_name_T << "::" << type->name()
        << "Print(std::ostream& os) {\n";
@@ -5458,8 +5521,11 @@ void ImplementationVisitor::GenerateEnumVerifiers(
   std::stringstream cc_contents;
   {
     cc_contents << "#include \"src/compiler/code-assembler.h\"\n";
-    for (const std::string& include_path : GlobalContext::CppIncludes()) {
-      cc_contents << "#include " << StringLiteralQuote(include_path) << "\n";
+    for (const CppInclude& include : GlobalContext::CppIncludes()) {
+      if (include.csa_selected()) {
+        cc_contents << "#include " << StringLiteralQuote(include.include_path)
+                    << "\n";
+      }
     }
     cc_contents << "\n";
 
@@ -5506,8 +5572,11 @@ void ImplementationVisitor::GenerateExportedMacrosAssembler(
     h_contents << "#include \"src/execution/frames.h\"\n";
     h_contents << "#include \"torque-generated/csa-types.h\"\n";
 
-    for (const std::string& include_path : GlobalContext::CppIncludes()) {
-      cc_contents << "#include " << StringLiteralQuote(include_path) << "\n";
+    for (const CppInclude& include : GlobalContext::CppIncludes()) {
+      if (include.csa_selected()) {
+        cc_contents << "#include " << StringLiteralQuote(include.include_path)
+                    << "\n";
+      }
     }
     cc_contents << "#include \"torque-generated/" << file_name << ".h\"\n";
 

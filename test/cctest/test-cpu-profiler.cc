@@ -56,6 +56,7 @@
 #include "src/profiler/cpu-profiler.h"
 #include "src/profiler/profiler-listener.h"
 #include "src/profiler/symbolizer.h"
+#include "src/sandbox/sandboxable-thread.h"
 #include "src/utils/utils.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-utils.h"
@@ -1016,7 +1017,7 @@ class TestApiCallbacks {
   }
 
   static void Setter(v8::Local<v8::Name> name, v8::Local<v8::Value> value,
-                     const v8::PropertyCallbackInfo<void>& info) {
+                     const v8::PropertyCallbackInfo<v8::Boolean>& info) {
     TestApiCallbacks* data = FromInfo(info);
     data->CollectSample(info.GetIsolate());
   }
@@ -1402,10 +1403,12 @@ static void TickLines(bool optimize) {
 
   unsigned int line_count = func_node->GetHitLineCount();
   CHECK_EQ(2u, line_count);  // Expect two hit source lines - #1 and #5.
-  base::ScopedVector<v8::CpuProfileNode::LineTick> entries(line_count);
+  auto entries =
+      base::OwnedVector<v8::CpuProfileNode::LineTick>::NewForOverwrite(
+          line_count);
   CHECK(func_node->GetLineTicks(&entries[0], line_count));
   int value = 0;
-  for (int i = 0; i < entries.length(); i++)
+  for (size_t i = 0; i < entries.size(); i++)
     if (entries[i].line == hit_line && entries[i].column == hit_col) {
       value = entries[i].hit_count;
       break;
@@ -2376,18 +2379,18 @@ TEST(FunctionDetails) {
   CHECK_EQ(root->GetParent(), nullptr);
   const v8::CpuProfileNode* script = GetChild(env, root, "");
   CheckFunctionDetails(CcTest::isolate(), script, "", "script_b", true,
-                       script_b->GetUnboundScript()->GetId(),
+                       script_b->ScriptId(),
                        v8::CpuProfileNode::kNoLineNumberInfo,
                        CpuProfileNode::kNoColumnNumberInfo, root);
   const v8::CpuProfileNode* baz = GetChild(env, script, "baz");
   CheckFunctionDetails(CcTest::isolate(), baz, "baz", "script_b", true,
-                       script_b->GetUnboundScript()->GetId(), 3, 16, script);
+                       script_b->ScriptId(), 3, 16, script);
   const v8::CpuProfileNode* foo = GetChild(env, baz, "foo");
   CheckFunctionDetails(CcTest::isolate(), foo, "foo", "script_a", false,
-                       script_a->GetUnboundScript()->GetId(), 4, 1, baz);
+                       script_a->ScriptId(), 4, 1, baz);
   const v8::CpuProfileNode* bar = GetChild(env, foo, "bar");
   CheckFunctionDetails(CcTest::isolate(), bar, "bar", "script_a", false,
-                       script_a->GetUnboundScript()->GetId(), 5, 14, foo);
+                       script_a->ScriptId(), 5, 14, foo);
 }
 
 TEST(FunctionDetailsInlining) {
@@ -2458,18 +2461,18 @@ TEST(FunctionDetailsInlining) {
   CHECK_EQ(root->GetParent(), nullptr);
   const v8::CpuProfileNode* script = GetChild(env, root, "");
   CheckFunctionDetails(CcTest::isolate(), script, "", "script_a", false,
-                       script_a->GetUnboundScript()->GetId(),
+                       script_a->ScriptId(),
                        v8::CpuProfileNode::kNoLineNumberInfo,
                        v8::CpuProfileNode::kNoColumnNumberInfo, root);
   const v8::CpuProfileNode* alpha = FindChild(env, script, "alpha");
   // Return early if profiling didn't sample alpha.
   if (!alpha) return;
   CheckFunctionDetails(CcTest::isolate(), alpha, "alpha", "script_a", false,
-                       script_a->GetUnboundScript()->GetId(), 1, 15, script);
+                       script_a->ScriptId(), 1, 15, script);
   const v8::CpuProfileNode* beta = FindChild(env, alpha, "beta");
   if (!beta) return;
   CheckFunctionDetails(CcTest::isolate(), beta, "beta", "script_b", true,
-                       script_b->GetUnboundScript()->GetId(), 1, 14, alpha);
+                       script_b->ScriptId(), 1, 14, alpha);
 }
 
 static const char* pre_profiling_osr_script = R"(
@@ -2777,11 +2780,11 @@ TEST(DeoptAtFirstLevelInlinedSource) {
 
   v8::Local<v8::Script> inlined_script = v8_compile(inlined_source);
   inlined_script->Run(env).ToLocalChecked();
-  int inlined_script_id = inlined_script->GetUnboundScript()->GetId();
+  int inlined_script_id = inlined_script->ScriptId();
 
   v8::Local<v8::Script> script = v8_compile(source);
   script->Run(env).ToLocalChecked();
-  int script_id = script->GetUnboundScript()->GetId();
+  int script_id = script->ScriptId();
 
   i::CpuProfile* iprofile = iprofiler->GetProfile(0);
   iprofile->Print();
@@ -2819,10 +2822,12 @@ TEST(DeoptAtFirstLevelInlinedSource) {
 // deopt at the second level inlined function
 TEST(DeoptAtSecondLevelInlinedSource) {
   if (!CcTest::i_isolate()->use_optimizer()) return;
+#ifdef DEBUG
   if (i::v8_flags.turboshaft_verify_load_store_taggedness) {
     // TODO(dmercadier): investigate why this test doesn't work with this flag.
     return;
   }
+#endif
   i::v8_flags.allow_natives_syntax = true;
   v8::HandleScope scope(CcTest::isolate());
   v8::Local<v8::Context> env = CcTest::NewContext({PROFILER_EXTENSION_ID});
@@ -2855,11 +2860,11 @@ TEST(DeoptAtSecondLevelInlinedSource) {
 
   v8::Local<v8::Script> inlined_script = v8_compile(inlined_source);
   inlined_script->Run(env).ToLocalChecked();
-  int inlined_script_id = inlined_script->GetUnboundScript()->GetId();
+  int inlined_script_id = inlined_script->ScriptId();
 
   v8::Local<v8::Script> script = v8_compile(source);
   script->Run(env).ToLocalChecked();
-  int script_id = script->GetUnboundScript()->GetId();
+  int script_id = script->ScriptId();
 
   i::CpuProfile* iprofile = iprofiler->GetProfile(0);
   iprofile->Print();
@@ -3460,12 +3465,11 @@ void ProfileSomeCode(v8::Isolate* isolate) {
   profiler->Dispose();
 }
 
-class IsolateThread : public v8::base::Thread {
+class IsolateThread : public v8::internal::SandboxableThread {
  public:
-  IsolateThread() : Thread(Options("IsolateThread")) {}
+  IsolateThread() : SandboxableThread(Options("IsolateThread")) {}
 
   void Run() override {
-    v8::SandboxHardwareSupport::PrepareCurrentThreadForHardwareSandboxing();
     v8::Isolate::CreateParams create_params;
     create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
     v8::Isolate* isolate = v8::Isolate::New(create_params);
@@ -3521,15 +3525,14 @@ const char* varying_frame_size_script = R"(
     }
   )";
 
-class UnlockingThread : public v8::base::Thread {
+class UnlockingThread : public v8::internal::SandboxableThread {
  public:
   explicit UnlockingThread(v8::Local<v8::Context> env, int32_t threadNumber)
-      : Thread(Options("UnlockingThread")),
+      : SandboxableThread(Options("UnlockingThread")),
         env_(CcTest::isolate(), env),
         threadNumber_(threadNumber) {}
 
   void Run() override {
-    v8::SandboxHardwareSupport::PrepareCurrentThreadForHardwareSandboxing();
     v8::Isolate* isolate = CcTest::isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
@@ -4938,11 +4941,11 @@ TEST(CpuProfileJSONSerialization) {
   cpu_profiler->Dispose();
   CHECK_GT(stream.size(), 0);
   CHECK_EQ(1, stream.eos_signaled());
-  base::ScopedVector<char> json(stream.size());
-  stream.WriteTo(json);
+  auto json = base::OwnedVector<char>::NewForOverwrite(stream.size());
+  stream.WriteTo(json.as_vector());
 
   // Verify that snapshot string is valid JSON.
-  OneByteResource* json_res = new OneByteResource(json);
+  OneByteResource* json_res = new OneByteResource(json.as_vector());
   v8::Local<v8::String> json_string =
       v8::String::NewExternalOneByte(env.isolate(), json_res).ToLocalChecked();
   v8::Local<v8::Context> context = v8::Context::New(env.isolate());

@@ -66,7 +66,9 @@ bool Heap::IsMainThread() const {
   return isolate()->thread_id() == ThreadId::Current();
 }
 
-uint64_t Heap::external_memory() const { return external_memory_.total(); }
+uint64_t Heap::external_memory() const {
+  return external_memory_total_.load(std::memory_order_relaxed);
+}
 
 RootsTable& Heap::roots_table() { return isolate()->roots_table(); }
 
@@ -142,6 +144,14 @@ void Heap::SetSmiStringCache(Tagged<SmiStringCache> cache) {
 
 void Heap::SetDoubleStringCache(Tagged<DoubleStringCache> cache) {
   set_double_string_cache(cache);
+}
+
+void Heap::SetCachedBigIntDivisor(Tagged<BigInt> divisor) {
+  set_cached_bigint_divisor(divisor);
+}
+
+void Heap::SetNextCachedBigIntDivisor(Tagged<BigInt> divisor) {
+  set_next_cached_bigint_divisor(divisor);
 }
 
 #if V8_ENABLE_WEBASSEMBLY

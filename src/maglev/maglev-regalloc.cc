@@ -405,7 +405,6 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
     constant->regalloc_info()->SetConstantLocation();
     USE(value);
   }
-  DCHECK(graph_->shifted_int53().empty());
   for (const auto& [value, constant] : graph_->intptr()) {
     constant->regalloc_info()->SetConstantLocation();
     USE(value);
@@ -1842,13 +1841,6 @@ compiler::AllocatedOperand StraightForwardRegisterAllocator::AllocateRegister(
 }
 
 namespace {
-template <typename RegisterT>
-static RegisterT GetRegisterHint(const compiler::InstructionOperand& hint) {
-  if (hint.IsInvalid()) return RegisterT::no_reg();
-  DCHECK(hint.IsUnallocated());
-  return RegisterT::from_code(
-      compiler::UnallocatedOperand::cast(hint).fixed_register_index());
-}
 
 }  // namespace
 

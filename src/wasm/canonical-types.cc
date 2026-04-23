@@ -22,7 +22,7 @@ TypeCanonicalizer* GetTypeCanonicalizer() {
   return GetWasmEngine()->type_canonicalizer();
 }
 
-TypeCanonicalizer::TypeCanonicalizer() { AddPredefinedArrayTypes(); }
+TypeCanonicalizer::TypeCanonicalizer() { AddPredefinedTypes(); }
 
 void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size) {
   if (size == 0) return;
@@ -155,7 +155,8 @@ CanonicalTypeIndex TypeCanonicalizer::AddRecursiveGroup(
       CanonicalValueType::Primitive(NumericKind::kI32).raw_bit_field() ==
       ValueType::Primitive(NumericKind::kI32).raw_bit_field());
   CanonicalType canonical{reinterpret_cast<const CanonicalSig*>(sig),
-                          CanonicalTypeIndex{kNoSuperType}, kFinal, kNotShared};
+                          CanonicalTypeIndex{kNoSuperType}, kFinal,
+                          SharedFlag::kNo};
   base::MutexGuard guard(&mutex_);
   if (V8_UNLIKELY(canonical_supertypes_.size() == kMaxCanonicalTypes)) {
     auto oom_detail = base::FormattedString{}
@@ -227,31 +228,137 @@ const CanonicalArrayType* TypeCanonicalizer::LookupArray(
   return type->array_type;
 }
 
-void TypeCanonicalizer::AddPredefinedArrayTypes() {
-  static constexpr std::pair<CanonicalTypeIndex, CanonicalValueType>
+void TypeCanonicalizer::AddPredefinedSingletonGroup(CanonicalTypeIndex index,
+                                                    const CanonicalType& type) {
+  CanonicalSingletonGroup group{.type = type, .index = index};
+  const CanonicalSingletonGroup& stored_group =
+      *canonical_singleton_groups_.emplace(group).first;
+  canonical_types_.set(index, &stored_group.type);
+  canonical_supertypes_.emplace_back(CanonicalTypeIndex{kNoSuperType});
+  DCHECK_LE(canonical_supertypes_.size(), kMaxCanonicalTypes);
+}
+
+void TypeCanonicalizer::AddPredefinedTypes() {
+  static constexpr bool kFinal = true;
+  static constexpr CanonicalTypeIndex kNoSuper{kNoSuperType};
+  // Array types.
+  static constexpr std::tuple<CanonicalTypeIndex, CanonicalValueType,
+                              SharedFlag>
       kPredefinedArrayTypes[] = {
-          {kPredefinedArrayI8Index, {kWasmI8}},
-          {kPredefinedArrayI16Index, {kWasmI16}},
-          {kPredefinedArrayExternRefIndex, {kWasmExternRef}},
-          {kPredefinedArrayFuncRefIndex, {kWasmFuncRef}}};
+          {kPredefinedArrayI8Index, {kWasmI8}, SharedFlag::kNo},
+          {kPredefinedArrayI8SharedIndex, {kWasmI8}, SharedFlag::kYes},
+          {kPredefinedArrayI16Index, {kWasmI16}, SharedFlag::kNo},
+          {kPredefinedArrayI16SharedIndex, {kWasmI16}, SharedFlag::kYes},
+          {kPredefinedArrayExternRefIndex, {kWasmExternRef}, SharedFlag::kNo},
+          {kPredefinedArrayFuncRefIndex, {kWasmFuncRef}, SharedFlag::kNo}};
   canonical_types_.reserve(kNumberOfPredefinedTypes, &zone_);
-  for (auto [index, element_type] : kPredefinedArrayTypes) {
+  for (auto [index, element_type, sharedness] : kPredefinedArrayTypes) {
     DCHECK_GT(kNumberOfPredefinedTypes, index.index);
     DCHECK_EQ(index.index, canonical_singleton_groups_.size());
     static constexpr bool kMutable = true;
-    static constexpr bool kFinal = true;
-    static constexpr bool kShared = false;  // TODO(14616): Fix this.
     CanonicalArrayType* type =
         zone_.New<CanonicalArrayType>(element_type, kMutable);
-    CanonicalSingletonGroup group{
-        .type = CanonicalType(type, CanonicalTypeIndex{kNoSuperType}, kFinal,
-                              kShared),
-        .index = index};
-    const CanonicalSingletonGroup& stored_group =
-        *canonical_singleton_groups_.emplace(group).first;
-    canonical_types_.set(index, &stored_group.type);
-    canonical_supertypes_.emplace_back(CanonicalTypeIndex{kNoSuperType});
-    DCHECK_LE(canonical_supertypes_.size(), kMaxCanonicalTypes);
+    AddPredefinedSingletonGroup(
+        index, CanonicalType(type, kNoSuper, kFinal, sharedness));
+  }
+  // Signature types.
+  static constexpr CanonicalValueType kRefExtern = kWasmRefExtern;
+  static constexpr CanonicalValueType kSharedRefExtern =
+      kWasmSharedExternRef.AsNonNull();
+  static constexpr CanonicalValueType kExternRef = kWasmExternRef;
+  static constexpr CanonicalValueType kSharedExternRef = kWasmSharedExternRef;
+  static constexpr CanonicalValueType kI32 = kWasmI32;
+  static constexpr CanonicalValueType kA8 = CanonicalValueType::RefNull(
+      kPredefinedArrayI8Index, SharedFlag::kNo, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kAS8 = CanonicalValueType::RefNull(
+      kPredefinedArrayI8SharedIndex, SharedFlag::kYes, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kA16 = CanonicalValueType::RefNull(
+      kPredefinedArrayI16Index, SharedFlag::kNo, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kAS16 = CanonicalValueType::RefNull(
+      kPredefinedArrayI16SharedIndex, SharedFlag::kYes, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kN8 = CanonicalValueType::Ref(
+      kPredefinedArrayI8Index, SharedFlag::kNo, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kNS8 = CanonicalValueType::Ref(
+      kPredefinedArrayI8SharedIndex, SharedFlag::kYes, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kAE = CanonicalValueType::RefNull(
+      kPredefinedArrayExternRefIndex, SharedFlag::kNo, RefTypeKind::kArray);
+  static constexpr CanonicalValueType kAF = CanonicalValueType::RefNull(
+      kPredefinedArrayFuncRefIndex, SharedFlag::kNo, RefTypeKind::kArray);
+
+  static constexpr CanonicalValueType kReps_e_i[] = {kRefExtern, kI32};
+  static constexpr CanonicalValueType kReps_t_i[] = {kSharedRefExtern, kI32};
+  static constexpr CanonicalValueType kReps_e_rr[] = {kRefExtern, kExternRef,
+                                                      kExternRef};
+  static constexpr CanonicalValueType kReps_t_ss[] = {
+      kSharedRefExtern, kSharedExternRef, kSharedExternRef};
+  static constexpr CanonicalValueType kReps_e_rii[] = {kRefExtern, kExternRef,
+                                                       kI32, kI32};
+  static constexpr CanonicalValueType kReps_t_sii[] = {
+      kSharedRefExtern, kSharedExternRef, kI32, kI32};
+  static constexpr CanonicalValueType kReps_i_ri[] = {kI32, kExternRef, kI32};
+  static constexpr CanonicalValueType kReps_i_si[] = {kI32, kSharedExternRef,
+                                                      kI32};
+  static constexpr CanonicalValueType kReps_i_rr[] = {kI32, kExternRef,
+                                                      kExternRef};
+  static constexpr CanonicalValueType kReps_i_ss[] = {kI32, kSharedExternRef,
+                                                      kSharedExternRef};
+  static constexpr CanonicalValueType kReps_e_a16ii[] = {kRefExtern, kA16, kI32,
+                                                         kI32};
+  static constexpr CanonicalValueType kReps_t_as16ii[] = {kSharedRefExtern,
+                                                          kAS16, kI32, kI32};
+  static constexpr CanonicalValueType kReps_i_ra16i[] = {kI32, kExternRef, kA16,
+                                                         kI32};
+  static constexpr CanonicalValueType kReps_i_sas16i[] = {
+      kI32, kSharedExternRef, kAS16, kI32};
+  static constexpr CanonicalValueType kReps_i_ra8i[] = {kI32, kExternRef, kA8,
+                                                        kI32};
+  static constexpr CanonicalValueType kReps_i_sas8i[] = {kI32, kSharedExternRef,
+                                                         kAS8, kI32};
+  static constexpr CanonicalValueType kReps_n8_r[] = {kN8, kExternRef};
+  static constexpr CanonicalValueType kReps_ns8_s[] = {kNS8, kSharedExternRef};
+  static constexpr CanonicalValueType kReps_e_a8ii[] = {kRefExtern, kA8, kI32,
+                                                        kI32};
+  static constexpr CanonicalValueType kReps_t_as8ii[] = {kSharedRefExtern, kAS8,
+                                                         kI32, kI32};
+  static constexpr CanonicalValueType kReps_configureAll[] = {kAE, kAF, kA8,
+                                                              kExternRef};
+
+  static constexpr std::tuple<CanonicalTypeIndex, size_t /* return count */,
+                              size_t /* parameter count */,
+                              const CanonicalValueType*>
+      kPredefinedSigs[] = {
+          {kPredefinedSigIndex_e_i, 1, 1, kReps_e_i},
+          {kPredefinedSigIndex_t_i, 1, 1, kReps_t_i},
+          {kPredefinedSigIndex_e_r, 1, 1, kReps_e_rr},
+          {kPredefinedSigIndex_t_s, 1, 1, kReps_t_ss},
+          {kPredefinedSigIndex_e_rr, 1, 2, kReps_e_rr},
+          {kPredefinedSigIndex_t_ss, 1, 2, kReps_t_ss},
+          {kPredefinedSigIndex_e_rii, 1, 3, kReps_e_rii},
+          {kPredefinedSigIndex_t_sii, 1, 3, kReps_t_sii},
+          {kPredefinedSigIndex_i_r, 1, 1, kReps_i_ri},
+          {kPredefinedSigIndex_i_s, 1, 1, kReps_i_si},
+          {kPredefinedSigIndex_i_ri, 1, 2, kReps_i_ri},
+          {kPredefinedSigIndex_i_si, 1, 2, kReps_i_si},
+          {kPredefinedSigIndex_i_rr, 1, 2, kReps_i_rr},
+          {kPredefinedSigIndex_i_ss, 1, 2, kReps_i_ss},
+          {kPredefinedSigIndex_e_a16ii, 1, 3, kReps_e_a16ii},
+          {kPredefinedSigIndex_t_as16ii, 1, 3, kReps_t_as16ii},
+          {kPredefinedSigIndex_i_ra16i, 1, 3, kReps_i_ra16i},
+          {kPredefinedSigIndex_i_sas16i, 1, 3, kReps_i_sas16i},
+          {kPredefinedSigIndex_i_ra8i, 1, 3, kReps_i_ra8i},
+          {kPredefinedSigIndex_i_sas8i, 1, 3, kReps_i_sas8i},
+          {kPredefinedSigIndex_n8_r, 1, 1, kReps_n8_r},
+          {kPredefinedSigIndex_ns8_s, 1, 1, kReps_ns8_s},
+          {kPredefinedSigIndex_e_a8ii, 1, 3, kReps_e_a8ii},
+          {kPredefinedSigIndex_t_as8ii, 1, 3, kReps_t_as8ii},
+          {kPredefinedSigIndex_configureAll, 0, 4, kReps_configureAll}};
+  for (auto [index, return_count, parameter_count, reps] : kPredefinedSigs) {
+    DCHECK_GT(kNumberOfPredefinedTypes, index.index);
+    DCHECK_EQ(index.index, canonical_singleton_groups_.size());
+    CanonicalSig* type =
+        zone_.New<CanonicalSig>(return_count, parameter_count, reps, index);
+    AddPredefinedSingletonGroup(
+        index, CanonicalType(type, kNoSuper, kFinal, SharedFlag::kNo));
   }
 }
 
@@ -301,7 +408,7 @@ void TypeCanonicalizer::EmptyStorageForTesting() {
   canonical_groups_.clear();
   canonical_singleton_groups_.clear();
   zone_.Reset();
-  AddPredefinedArrayTypes();
+  AddPredefinedTypes();
 }
 
 TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
@@ -355,9 +462,9 @@ TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
     }
     case TypeDefinition::kStruct: {
       const StructType* original_type = type.struct_type;
-      CanonicalStructType::Builder builder(&zone_, original_type->field_count(),
-                                           original_type->is_descriptor(),
-                                           original_type->is_shared());
+      CanonicalStructType::Builder<Zone> builder(
+          &zone_, original_type->field_count(), original_type->is_descriptor(),
+          original_type->is_shared());
       for (uint32_t i = 0; i < original_type->field_count(); i++) {
         builder.AddField(CanonicalizeValueType(original_type->field(i)),
                          original_type->mutability(i),
@@ -365,7 +472,8 @@ TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
       }
       builder.set_total_fields_size(original_type->total_fields_size());
       return CanonicalType(
-          builder.Build(CanonicalStructType::Builder::kUseProvidedOffsets),
+          builder.Build(
+              CanonicalStructType::Builder<Zone>::kUseProvidedOffsets),
           supertype, CanonicalizeTypeIndex(type.descriptor),
           CanonicalizeTypeIndex(type.describes), type.is_final, type.is_shared);
     }
@@ -439,16 +547,16 @@ void TypeCanonicalizer::PrepareForCanonicalTypeId(Isolate* isolate,
   // the {old_length * 3} computation below must not overflow.
   static_assert(kMaxCanonicalTypes <= kMaxInt / 3 - 1);
   // Canonical types are zero-indexed.
-  const int length = id.index + 1;
+  const uint32_t length = id.index + 1;
   // The fast path is non-handlified.
   Tagged<WeakFixedArray> old_rtts_raw = heap->wasm_canonical_rtts();
 
   // Fast path: length is sufficient.
-  int old_length = old_rtts_raw->length();
+  uint32_t old_length = old_rtts_raw->ulength().value();
   if (old_length >= length) return;
 
   // Allocate a bigger WeakFixedArray, growing exponentially.
-  const int new_length = std::max(old_length * 3 / 2, length);
+  const uint32_t new_length = std::max(old_length * 3 / 2, length);
   CHECK_LT(old_length, new_length);
 
   // Allocation can invalidate previous unhandled pointers.
@@ -473,18 +581,10 @@ void TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(Isolate* isolate) {
   isolate->heap()->SetJSToWasmWrappers(roots.empty_weak_fixed_array());
 }
 
-bool TypeCanonicalizer::IsFunctionSignature(CanonicalTypeIndex index) const {
-  return canonical_types_[index]->kind == CanonicalType::kFunction;
-}
-bool TypeCanonicalizer::IsStruct(CanonicalTypeIndex index) const {
-  return canonical_types_[index]->kind == CanonicalType::kStruct;
-}
-bool TypeCanonicalizer::IsArray(CanonicalTypeIndex index) const {
-  return canonical_types_[index]->kind == CanonicalType::kArray;
-}
-bool TypeCanonicalizer::IsShared(CanonicalTypeIndex index) const {
+SharedFlag TypeCanonicalizer::IsShared(CanonicalTypeIndex index) const {
   return canonical_types_[index]->is_shared;
 }
+// Currently only used for heap verification.
 bool TypeCanonicalizer::has_descriptor(CanonicalTypeIndex index) const {
   return canonical_types_[index]->descriptor.valid();
 }

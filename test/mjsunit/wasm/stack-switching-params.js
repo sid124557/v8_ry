@@ -24,6 +24,9 @@ let tag_ilfdsr_ilfdsr = builder.addTag(makeSig(ilfdsr, ilfdsr));
 let block_sig_ilfdsr = builder.addType(
     makeSig([], ilfdsr.concat([wasmRefType(cont_ilfdsr_ilfdsr)])));
 
+let sig_r_r = builder.addType(kSig_r_r);
+let cont_r_r = builder.addCont(sig_r_r);
+
 // Use the memory and a global to pass and receive values to and from the
 // initial func ref of a stack, until the stack entry wrapper supports
 // params/returns:
@@ -174,6 +177,19 @@ let test_ilfdsr = builder.addFunction("test_ilfdsr", kSig_v_v)
       kSimdPrefix, kExprS128StoreMem, 0, 24,
   ]).exportFunc();
 
+let identity_ref = builder.addFunction("identity_ref", kSig_r_r)
+    .addBody([
+        kExprLocalGet, 0,
+    ]).exportFunc();
+block_sig = builder.addType(makeSig([], [wasmRefType(cont_r_r)]));
+builder.addFunction("test_return_ref", kSig_r_r)
+    .addBody([
+        kExprLocalGet, 0,
+        kExprRefFunc, identity_ref.index,
+        kExprContNew, cont_r_r,
+        kExprResume, cont_r_r, 0,
+    ]).exportFunc();
+
 let instance = builder.instantiate();
 
 (function TestI32() {
@@ -219,4 +235,64 @@ let instance = builder.instantiate();
   }
   assertSame(instance.exports.g_ref_in.value,
              instance.exports.g_ref_cont_return.value);
+})();
+
+(function TestReturnRef() {
+  let ref = {};
+  assertEquals(ref, instance.exports.test_return_ref(ref));
+})();
+
+
+(function TestSwitchSimd() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  let sig_v_v = builder.addType(kSig_v_v);
+  let cont_v_v = builder.addCont(sig_v_v);
+  let sig_s_v = builder.addType(makeSig([], [kWasmS128]));
+  let cont_s_v = builder.addCont(sig_s_v);
+  // Return continuation for target: takes v128 and dummy cont.
+  let sig_s_c = builder.addType(makeSig([kWasmS128, wasmRefType(cont_s_v)], [kWasmS128]));
+  let cont_s_c = builder.addCont(sig_s_c);
+  // Target of switch must take a continuation as its last parameter.
+  let sig_target = builder.addType(makeSig([kWasmS128, wasmRefType(cont_s_c)], [kWasmS128]));
+  let cont_target = builder.addCont(sig_target);
+  let simd_tag = builder.addTag(makeSig([], [kWasmS128]));
+
+  let target = builder.addFunction("target", sig_target)
+      .addBody([
+          ...wasmI32Const(1),
+          kSimdPrefix, kExprI32x4Splat,
+          kExprLocalGet, 1, // The return continuation (cont_s_c)
+          kExprSwitch, cont_s_c, simd_tag,
+          kExprUnreachable,
+      ]).exportFunc();
+
+  let switch_func = builder.addFunction("switch_func", sig_s_v)
+      .addBody([
+          // Provide dummy v128 parameter for the initial switch
+          ...wasmI32Const(0),
+          kSimdPrefix, kExprI32x4Splat,
+          kExprRefFunc, target.index,
+          kExprContNew, cont_target,
+          kExprSwitch, cont_target, simd_tag,
+          // switch pushes parameters of cont_s_c: v128, cont_s_v
+          kExprDrop, // drop cont_s_v
+          kExprReturn, // return v128
+      ]).exportFunc();
+
+  builder.addFunction("main", kSig_i_v)
+      .addBody([
+          kExprRefFunc, switch_func.index,
+          kExprContNew, cont_s_v,
+          kExprResume, cont_s_v, 1,
+            kOnSwitch, simd_tag,
+          // Check result (v128)
+          ...wasmI32Const(1),
+          ...SimdInstr(kExprI32x4Splat),
+          ...SimdInstr(kExprI32x4Eq),
+          ...SimdInstr(kExprI32x4AllTrue)
+      ]).exportFunc();
+
+    let instance = builder.instantiate();
+    assertEquals(1, instance.exports.main());
 })();

@@ -41,6 +41,7 @@ struct InliningPosition;
 class LookupIterator;
 class PropertyDescriptorObject;
 class ReadOnlyRoots;
+class EarlyReadOnlyRoots;
 class RootVisitor;
 class PropertyKey;
 
@@ -144,7 +145,7 @@ class Object : public AllStatic {
     kToNumeric  // Numeric = Smi or HeapNumber or BigInt
   };
 
-  // ES6, #sec-isarray.  NOT to be confused with %_IsArray.
+  // https://tc39.es/ecma262/#sec-isarray.  NOT to be confused with %_IsArray.
   V8_INLINE
   V8_WARN_UNUSED_RESULT static Maybe<bool> IsArray(DirectHandle<Object> object);
 
@@ -162,8 +163,13 @@ class Object : public AllStatic {
   V8_WARN_UNUSED_RESULT static inline Maybe<double> IntegerValue(
       Isolate* isolate, HandleType<T> input);
 
-  static inline Representation OptimalRepresentation(
-      Tagged<Object> obj, PtrComprCageBase cage_base);
+  // Selects optimal representation and constness for a given value.
+  // Usually, the constness stays unmodified unless the value is a HeapNumber
+  // with the hole NaN pattern. This is necessary to distinguish between
+  // initialized and non-initialized double fields.
+  static inline std::pair<Representation, PropertyConstness>
+  OptimalRepresentation(Tagged<Object> obj, PropertyConstness constness,
+                        PtrComprCageBase cage_base);
 
   static inline ElementsKind OptimalElementsKind(Tagged<Object> obj,
                                                  PtrComprCageBase cage_base);
@@ -692,11 +698,13 @@ V8_INLINE constexpr bool IsWeak(
 // TODO(leszeks): These exist both as free functions and members of Tagged. They
 // probably want to be cleaned up at some point.
 V8_INLINE bool IsSmi(Tagged<Object> obj) { return obj.IsSmi(); }
-V8_INLINE bool IsSmi(Tagged<HeapObject> obj) { return false; }
+V8_INLINE bool IsSmi(Tagged<HeapObject> obj) { return obj.IsSmi(); }
 V8_INLINE bool IsSmi(Tagged<Smi> obj) { return true; }
 
 V8_INLINE bool IsHeapObject(Tagged<Object> obj) { return obj.IsHeapObject(); }
-V8_INLINE bool IsHeapObject(Tagged<HeapObject> obj) { return true; }
+V8_INLINE bool IsHeapObject(Tagged<HeapObject> obj) {
+  return obj.IsHeapObject();
+}
 V8_INLINE bool IsHeapObject(Tagged<Smi> obj) { return false; }
 
 V8_INLINE bool IsTaggedIndex(Tagged<Object> obj);
@@ -707,6 +715,7 @@ V8_INLINE bool IsTaggedIndex(Tagged<Object> obj);
 OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
 HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
 IS_TYPE_FUNCTION_DECL(HashTableBase)
+IS_TYPE_FUNCTION_DECL(SloppyArgumentsElements)
 IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
 IS_TYPE_FUNCTION_DECL(PropertyDictionary)
 // A wrapper around IsHole to make it easier to distinguish from specific hole
@@ -718,10 +727,11 @@ V8_INLINE bool IsNumber(Tagged<Object> obj, ReadOnlyRoots roots);
 
 // Oddball checks are faster when they are raw pointer comparisons, so the
 // isolate/read-only roots overloads should be preferred where possible.
-#define IS_TYPE_FUNCTION_DECL(Type, ...)                              \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, Isolate* isolate);      \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, LocalIsolate* isolate); \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, ReadOnlyRoots roots);   \
+#define IS_TYPE_FUNCTION_DECL(Type, ...)                                 \
+  V8_INLINE bool Is##Type(Tagged<Object> obj, Isolate* isolate);         \
+  V8_INLINE bool Is##Type(Tagged<Object> obj, LocalIsolate* isolate);    \
+  V8_INLINE bool Is##Type(Tagged<Object> obj, ReadOnlyRoots roots);      \
+  V8_INLINE bool Is##Type(Tagged<Object> obj, EarlyReadOnlyRoots roots); \
   V8_INLINE bool Is##Type(Tagged<Object> obj);
 ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
 HOLE_LIST(IS_TYPE_FUNCTION_DECL)

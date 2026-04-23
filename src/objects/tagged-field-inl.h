@@ -473,6 +473,27 @@ TaggedField<T, kFieldOffset, CompressionScheme>::SeqCst_CompareAndSwap(
       tagged_to_full(host.ptr(), old_value));
 }
 
+JSDispatchHandle JSDispatchHandleMember::Relaxed_Load() const {
+  return JSDispatchHandle(static_cast<JSDispatchHandle::underlying_type>(
+      storage_.load(std::memory_order_relaxed)));
+}
+
+JSDispatchHandle JSDispatchHandleMember::Acquire_Load() const {
+  return JSDispatchHandle(static_cast<JSDispatchHandle::underlying_type>(
+      storage_.load(std::memory_order_acquire)));
+}
+
+void JSDispatchHandleMember::Relaxed_Clear() {
+  storage_.store(0, std::memory_order_relaxed);
+}
+
+void JSDispatchHandleMember::Relaxed_Store(HeapObjectLayout* host,
+                                           JSDispatchHandle handle,
+                                           WriteBarrierMode mode) {
+  storage_.store(handle.value(), std::memory_order_relaxed);
+  WriteBarrier::ForJSDispatchHandle(host, handle, mode);
+}
+
 }  // namespace internal
 }  // namespace v8
 

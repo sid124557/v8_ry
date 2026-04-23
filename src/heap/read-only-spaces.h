@@ -69,6 +69,13 @@ class ReadOnlyPage final : public BasePage {
   friend class ReadOnlySpace;
 };
 
+template <>
+struct CastTraits<ReadOnlyPage> {
+  static inline bool AllowFrom(const BasePage& page) {
+    return page.IsReadOnlyPage();
+  }
+};
+
 // -----------------------------------------------------------------------------
 // Artifacts used to construct a new SharedReadOnlySpace
 class ReadOnlyArtifacts final {
@@ -200,7 +207,7 @@ class ReadOnlySpace : public BaseSpace {
   // Returns the index within pages_. The chunk must be part of this space.
   size_t IndexOf(const BasePage* chunk) const;
 
-  bool ContainsSlow(Address addr) const;
+  V8_EXPORT_PRIVATE bool ContainsSlow(Address addr) const;
   V8_EXPORT_PRIVATE void ShrinkPages();
 
 #ifdef VERIFY_HEAP

@@ -216,6 +216,9 @@ class V8_EXPORT_PRIVATE GCTracer {
     // Currently in loading state.
     bool is_loading = false;
 
+    // Currently in input state.
+    bool is_input_handling = false;
+
     // Size of objects in heap set in constructor.
     size_t start_object_size = 0;
 
@@ -316,6 +319,8 @@ class V8_EXPORT_PRIVATE GCTracer {
 
   GCTracer(const GCTracer&) = delete;
   GCTracer& operator=(const GCTracer&) = delete;
+
+  perfetto::NamedTrack tracing_track() const { return parent_track_; }
 
   V8_INLINE CollectionEpoch CurrentEpoch() const;
 
@@ -589,15 +594,29 @@ class V8_EXPORT_PRIVATE GCTracer {
   BytesAndDurationBuffer recorded_major_totals_;
   BytesAndDurationBuffer recorded_embedder_marking_;
 
-  static constexpr base::TimeDelta kSmoothedAllocationSpeedDecayRate =
+  // Use different decay rates here based on whether the allocation throughput
+  // is increasing or decreasing. We use 100ms as decay rate for increasing
+  // allocation rate and 1s as decay rate for decreasing allocation rate. So for
+  // example to get from an allocation rate  of 1GB/s down to 1MB/s it takes ~10
+  // seconds. But going from the 1MB/s back up to 1GB/s can be achieved in ~1
+  // second instead. This allows us to quickly react to spikes and at the same
+  // time we do not throttle down too much for short periods of idleness.
+  // Shrinking too quickly can result in e.g. prematurely reducing new space
+  // size.
+  static constexpr base::TimeDelta kSmoothedAllocationSpeedIncreaseDecayRate =
       v8::base::TimeDelta::FromMilliseconds(100);
+  static constexpr base::TimeDelta kSmoothedAllocationSpeedDeclineDecayRate =
+      v8::base::TimeDelta::FromMilliseconds(1000);
 
   SmoothedBytesAndDuration new_generation_allocations_{
-      kSmoothedAllocationSpeedDecayRate};
+      kSmoothedAllocationSpeedIncreaseDecayRate,
+      kSmoothedAllocationSpeedDeclineDecayRate};
   SmoothedBytesAndDuration old_generation_allocations_{
-      kSmoothedAllocationSpeedDecayRate};
+      kSmoothedAllocationSpeedIncreaseDecayRate,
+      kSmoothedAllocationSpeedDeclineDecayRate};
   SmoothedBytesAndDuration embedder_generation_allocations_{
-      kSmoothedAllocationSpeedDecayRate};
+      kSmoothedAllocationSpeedIncreaseDecayRate,
+      kSmoothedAllocationSpeedDeclineDecayRate};
 
   // Estimate for young generation speed. Based on walltime and concurrency
   // estimates.

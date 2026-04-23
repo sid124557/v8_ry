@@ -159,7 +159,7 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
     requested = kMinimumCodeRangeSize;
   }
 
-  const size_t kPageSize = MutablePage::kPageSize;
+  const size_t kPageSize = NormalPage::kPageSize;
   const size_t allocate_page_size = page_allocator->AllocatePageSize();
   CHECK(IsAligned(kPageSize, allocate_page_size));
 
@@ -622,6 +622,7 @@ uint8_t* CodeRange::RemapEmbeddedBuiltins(Isolate* isolate,
                                  std::memory_order_release);
   return embedded_blob_code_copy;
 }
+#undef TRACE
 
 }  // namespace internal
 }  // namespace v8

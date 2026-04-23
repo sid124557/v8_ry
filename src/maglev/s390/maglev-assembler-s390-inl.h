@@ -547,9 +547,24 @@ inline void MaglevAssembler::AddInt32(Register reg, int amount) {
   AddS32(reg, Operand(amount));
 }
 
+inline void MaglevAssembler::AddInt32(Register reg, Register other) {
+  AddS32(reg, other);
+  LoadS32(reg, reg);
+}
+
+inline void MaglevAssembler::AddInt32(Register dst, Register src, int amount) {
+  AddS32(dst, src, Operand(amount));
+  LoadS32(dst, dst);
+}
+
 inline void MaglevAssembler::AndInt32(Register reg, int mask) {
   And(reg, Operand(mask));
   LoadU32(reg, reg);
+}
+
+inline void MaglevAssembler::AndInt32(Register dst, Register src, int mask) {
+  And(dst, src, Operand(mask));
+  LoadU32(dst, dst);
 }
 
 inline void MaglevAssembler::OrInt32(Register reg, int mask) {
@@ -571,6 +586,40 @@ inline void MaglevAssembler::ShiftLeft(Register reg, int amount) {
   ShiftLeftU32(reg, reg, Operand(amount));
 }
 
+void MaglevAssembler::ShiftRightLogical32(Register dst, int32_t value) {
+  ShiftRightU32(dst, dst, Operand(value));
+}
+
+inline void MaglevAssembler::ShiftRightLogical32(Register dst, Register src,
+                                                 int32_t value) {
+  ShiftRightU32(dst, src, Operand(value));
+}
+
+inline void MaglevAssembler::SubInt32(Register dst, Register src) {
+  SubS32(dst, src);
+  LoadS32(dst, dst);
+}
+
+inline void MaglevAssembler::SubInt32(Register dst, Register src1,
+                                      Register src2) {
+  SubS32(dst, src1, src2);
+  LoadS32(dst, dst);
+}
+
+inline void MaglevAssembler::LoadBitsFromWord32(Register dst, Register src,
+                                                int width, int shift) {
+  if (dst != src) {
+    mov(dst, src);
+  }
+  if (shift != 0) {
+    ShiftRightU32(dst, dst, Operand(shift));
+  }
+  if (shift + width < 32) {
+    And(dst, Operand((1 << width) - 1));
+    LoadU32(dst, dst);
+  }
+}
+
 inline void MaglevAssembler::IncrementAddress(Register reg, int32_t delta) {
   CHECK(is_int20(delta));
   lay(reg, MemOperand(reg, delta));
@@ -580,9 +629,12 @@ inline void MaglevAssembler::LoadAddress(Register dst, MemOperand location) {
   lay(dst, location);
 }
 
+inline void MaglevAssembler::MakeWeak(Register dst, Register src) {
+  OrP(dst, src, Operand(kWeakHeapObjectTag));
+}
+
 inline void MaglevAssembler::EmitEnterExitFrame(int extra_slots,
                                                 StackFrame::Type frame_type,
-                                                Register c_function,
                                                 Register scratch) {
   EnterExitFrame(scratch, extra_slots, frame_type);
 }
@@ -995,6 +1047,59 @@ void MaglevAssembler::Float64SilenceNan(DoubleRegister value) {
   CanonicalizeNaN(value, value);
 }
 
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+void MaglevAssembler::JumpIfUndefinedNan(DoubleRegister value, Register scratch,
+                                         Label* target,
+                                         Label::Distance distance) {
+  // TODO(leszeks): Right now this only accepts Zone-allocated target labels.
+  // This works because all callsites are jumping to either a deopt, deferred
+  // code, or a basic block. If we ever need to jump to an on-stack label, we
+  // have to add support for it here change the caller to pass a ZoneLabelRef.
+  DCHECK(compilation_info()->zone()->Contains(target));
+  ZoneLabelRef is_undefined = ZoneLabelRef::UnsafeFromLabelPointer(target);
+  ZoneLabelRef is_not_undefined(this);
+  CmpF64(value, value);
+  JumpIf(unordered,
+         MakeDeferredCode(
+             [](MaglevAssembler* masm, DoubleRegister value, Register scratch,
+                ZoneLabelRef is_undefined, ZoneLabelRef is_not_undefined) {
+               masm->lgdr(scratch, value);
+               masm->ShiftRightU64(scratch, scratch, Operand(32));
+               masm->CompareInt32AndJumpIf(scratch, kUndefinedNanUpper32,
+                                           kEqual, *is_undefined);
+               masm->Jump(*is_not_undefined);
+             },
+             value, scratch, is_undefined, is_not_undefined));
+  bind(*is_not_undefined);
+}
+
+void MaglevAssembler::JumpIfUndefinedNan(MemOperand operand, Label* target,
+                                         Label::Distance distance) {
+  MaglevAssembler::TemporaryRegisterScope temps(this);
+  Register upper_bits = temps.AcquireScratch();
+#if V8_TARGET_BIG_ENDIAN
+  LoadU32(upper_bits, operand, r0);
+#else
+  LoadU32(upper_bits,
+          MemOperand(operand.getIndexRegister(), operand.getBaseRegister(),
+                     operand.offset() + (kDoubleSize / 2)),
+          r0);
+#endif
+  CompareInt32AndJumpIf(upper_bits, kUndefinedNanUpper32, kEqual, target,
+                        distance);
+}
+
+void MaglevAssembler::JumpIfNotUndefinedNan(DoubleRegister value,
+                                            Register scratch, Label* target,
+                                            Label::Distance distance) {
+  JumpIfNotNan(value, target, distance);
+  lgdr(scratch, value);
+  ShiftRightU64(scratch, scratch, Operand(32));
+  CompareInt32AndJumpIf(scratch, kUndefinedNanUpper32, kNotEqual, target,
+                        distance);
+}
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+
 void MaglevAssembler::JumpIfHoleNan(DoubleRegister value, Register scratch,
                                     Label* target, Label::Distance distance) {
   // TODO(leszeks): Right now this only accepts Zone-allocated target labels.
@@ -1377,8 +1482,7 @@ inline Condition MaglevAssembler::FunctionEntryStackCheck(
   Register stack_cmp_reg = sp;
   if (stack_check_offset >= kStackLimitSlackForDeoptimizationInBytes) {
     stack_cmp_reg = r0;
-    mov(stack_cmp_reg, sp);
-    lay(stack_cmp_reg, MemOperand(stack_cmp_reg, -stack_check_offset));
+    AddS64(stack_cmp_reg, sp, Operand(-stack_check_offset));
   }
   CmpU64(stack_cmp_reg, interrupt_stack_limit);
   return ge;

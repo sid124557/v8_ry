@@ -44,6 +44,10 @@
 #include "src/diagnostics/etw-jit-win.h"
 #endif  // V8_ENABLE_ETW_STACK_WALKING
 
+#if defined(V8_ENABLE_SANDBOX) && defined(V8_ENABLE_MEMORY_CORRUPTION_API)
+#include "src/sandbox/external-strings-cage.h"
+#endif  // V8_ENABLE_SANDBOX && V8_ENABLE_MEMORY_CORRUPTION_API
+
 namespace v8 {
 namespace internal {
 
@@ -154,7 +158,8 @@ base::AbortMode ChooseAbortMode() {
     // controlled fashion (e.g. in a SBXCHECK).
     return base::AbortMode::kExitWithSuccessAndIgnoreDcheckFailures;
   }
-  if (v8_flags.fuzzing || v8_flags.allow_natives_for_differential_fuzzing) {
+  if (v8_flags.fuzzing || v8_flags.allow_natives_for_differential_fuzzing ||
+      v8_flags.run_as_security_poc || v8_flags.run_as_sandbox_security_poc) {
     // For fuzzing, we want to ignore certain types of crashes that are known
     // to be safe (no security impact), such as OOMs and similar issues.
     return base::AbortMode::kExitIfNoSecurityImpact;
@@ -217,6 +222,10 @@ void V8::Initialize() {
   Sandbox::InitializeDefaultOncePerProcess(GetPlatformVirtualAddressSpace());
   CHECK_EQ(kSandboxSize, Sandbox::current()->size());
 
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+  ExternalStringsCage::InitializeOncePerProcess();
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
+
   // Enable sandbox testing mode if requested.
   //
   // This will install the sandbox crash filter to ignore all crashes that do
@@ -272,6 +281,9 @@ void V8::Dispose() {
   RegisteredExtension::UnregisterAll();
   FlagList::ReleaseDynamicAllocations();
   IsolateGroup::TearDownOncePerProcess();
+#if defined(V8_ENABLE_SANDBOX) && defined(V8_ENABLE_MEMORY_CORRUPTION_API)
+  ExternalStringsCage::TearDown();
+#endif  // V8_ENABLE_SANDBOX && V8_ENABLE_MEMORY_CORRUPTION_API
   AdvanceStartupState(V8StartupState::kV8Disposed);
 }
 
@@ -293,9 +305,7 @@ void V8::DisposePlatform() {
 
   platform_ = nullptr;
 
-#if DEBUG
-  internal::ThreadIsolation::CheckTrackedMemoryEmpty();
-#endif
+  ThreadIsolation::TearDown();
 
   AdvanceStartupState(V8StartupState::kPlatformDisposed);
 }
@@ -330,13 +340,6 @@ double Platform::SystemClockTimeMillis() {
 void SandboxHardwareSupport::InitializeBeforeThreadCreation() {
 #ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
   internal::SandboxHardwareSupport::TryActivateBeforeThreadCreation();
-#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
-}
-
-// static
-void SandboxHardwareSupport::PrepareCurrentThreadForHardwareSandboxing() {
-#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
-  internal::SandboxHardwareSupport::EnableForCurrentThread();
 #endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
 }
 

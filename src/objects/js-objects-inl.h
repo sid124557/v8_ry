@@ -44,22 +44,6 @@ namespace v8::internal {
 
 #include "torque-generated/src/objects/js-objects-tq-inl.inc"
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSReceiver)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSObjectWithEmbedderSlots)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSAPIObjectWithEmbedderSlots)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSCustomElementsObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSSpecialObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSAsyncFromSyncIterator)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSDate)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSGlobalObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSGlobalProxy)
-JSIteratorResult::JSIteratorResult(Address ptr) : JSObject(ptr) {}
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSMessageObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSPrimitiveWrapper)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSStringIterator)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSValidIteratorWrapper)
-
 DEF_GETTER(JSObject, elements, Tagged<FixedArrayBase>) {
   return TaggedField<FixedArrayBase, kElementsOffset>::load(cage_base, *this);
 }
@@ -307,11 +291,11 @@ void JSObject::initialize_elements() {
 }
 
 DEF_GETTER(JSObject, GetIndexedInterceptor, Tagged<InterceptorInfo>) {
-  return map(cage_base)->GetIndexedInterceptor(cage_base);
+  return map(cage_base)->GetIndexedInterceptor();
 }
 
 DEF_GETTER(JSObject, GetNamedInterceptor, Tagged<InterceptorInfo>) {
-  return map(cage_base)->GetNamedInterceptor(cage_base);
+  return map(cage_base)->GetNamedInterceptor();
 }
 
 // static
@@ -320,9 +304,8 @@ int JSObject::GetHeaderSize(Tagged<Map> map) {
   // falling into the generic switch. This speeds up the internal
   // field operations considerably on average.
   InstanceType instance_type = map->instance_type();
-  return instance_type == JS_OBJECT_TYPE
-             ? JSObject::kHeaderSize
-             : GetHeaderSize(instance_type, map->has_prototype_slot());
+  return instance_type == JS_OBJECT_TYPE ? JSObject::kHeaderSize
+                                         : GetHeaderSize(instance_type);
 }
 
 // static
@@ -412,13 +395,23 @@ Tagged<JSAny> JSObject::RawFastPropertyAt(FieldIndex index) const {
   return RawFastPropertyAt(cage_base, index);
 }
 
+// Type system violation: the declared return type Tagged<JSAny> is incorrect.
+// Property slots can also hold non-JSAny values such as the Hole sentinel
+// (`uninitialized_value` during MigrateFastToFast) and class metadata Structs
+// (e.g. ClassPositions, AccessorPair, AccessorInfo). The legacy code
+// reinterpret-loaded the slot as JSAny without validation; callers dispatch
+// on the descriptor's PropertyKind to know what they actually got.
+// TODO(jgruber): Change this to return
+// Tagged<UnionOf<JSAny, Hole, ClassPositions, AccessorPair, AccessorInfo>>
+// (or Tagged<Object>) and update the ~50 callers to Cast<JSAny> (or
+// whatever narrower type they actually expect) at the use site.
 Tagged<JSAny> JSObject::RawFastPropertyAt(PtrComprCageBase cage_base,
                                           FieldIndex index) const {
   if (index.is_inobject()) {
     return TaggedField<JSAny>::Relaxed_Load(cage_base, *this, index.offset());
   } else {
-    return property_array(cage_base)->get(cage_base,
-                                          index.outobject_array_index());
+    return UncheckedCast<JSAny>(property_array(cage_base)->get(
+        cage_base, index.outobject_array_index()));
   }
 }
 
@@ -430,14 +423,15 @@ Tagged<JSAny> JSObject::RawFastPropertyAt(FieldIndex index,
   return RawFastPropertyAt(cage_base, index, tag);
 }
 
+// See the TODO(jgruber) on the non-SeqCst overload above.
 Tagged<JSAny> JSObject::RawFastPropertyAt(PtrComprCageBase cage_base,
                                           FieldIndex index,
                                           SeqCstAccessTag tag) const {
   if (index.is_inobject()) {
     return TaggedField<JSAny>::SeqCst_Load(cage_base, *this, index.offset());
   } else {
-    return property_array(cage_base)->get(cage_base,
-                                          index.outobject_array_index(), tag);
+    return UncheckedCast<JSAny>(property_array(cage_base)->get(
+        cage_base, index.outobject_array_index(), tag));
   }
 }
 
@@ -590,15 +584,179 @@ int JSObject::GetInObjectPropertyOffset(int index) {
   return map()->GetInObjectPropertyOffset(index);
 }
 
-Tagged<Object> JSObject::InObjectPropertyAt(int index) {
-  int offset = GetInObjectPropertyOffset(index);
+Tagged<Object> JSObject::InObjectPropertyAtOffset(int offset) {
+  DCHECK_GE(offset, GetInObjectPropertyOffset(0));
+  DCHECK_LT(offset, Size());
   return TaggedField<Object>::load(*this, offset);
 }
 
-Tagged<Object> JSObject::InObjectPropertyAtPut(int index, Tagged<Object> value,
-                                               WriteBarrierMode mode) {
+Tagged<Object> JSObjectLayout::InObjectPropertyAtOffset(int offset) const {
+  return Cast<JSObject>(this)->InObjectPropertyAtOffset(offset);
+}
+
+Tagged<Object> JSObjectLayout::InObjectPropertyPutAtOffset(
+    int offset, Tagged<Object> value, WriteBarrierMode mode) {
+  return Cast<JSObject>(this)->InObjectPropertyPutAtOffset(offset, value, mode);
+}
+
+int JSObjectLayout::GetEmbedderFieldCount() const {
+  return Cast<JSObject>(this)->GetEmbedderFieldCount();
+}
+
+Tagged<PropertyArray> JSObjectLayout::property_array() const {
+  return Cast<JSObject>(this)->property_array();
+}
+
+Tagged<FixedArrayBase> JSObjectLayout::elements() const {
+  return elements_.load();
+}
+
+Tagged<FixedArrayBase> JSObjectLayout::elements(RelaxedLoadTag) const {
+  return elements_.Relaxed_Load();
+}
+
+void JSObjectLayout::set_elements(Tagged<FixedArrayBase> value,
+                                  WriteBarrierMode mode) {
+  elements_.store(this, value, mode);
+}
+
+void JSObjectLayout::initialize_elements() {
+  Cast<JSObject>(this)->initialize_elements();
+}
+
+ElementsKind JSObjectLayout::GetElementsKind() const {
+  return Cast<JSObject>(this)->GetElementsKind();
+}
+
+bool JSObjectLayout::HasObjectElements() const {
+  return Cast<JSObject>(this)->HasObjectElements();
+}
+
+bool JSObjectLayout::HasFastElements() const {
+  return Cast<JSObject>(this)->HasFastElements();
+}
+
+bool JSObjectLayout::HasHoleyElements() const {
+  return Cast<JSObject>(this)->HasHoleyElements();
+}
+
+bool JSObjectLayout::HasSmiOrObjectElements() const {
+  return Cast<JSObject>(this)->HasSmiOrObjectElements();
+}
+
+bool JSObjectLayout::HasDictionaryElements() const {
+  return Cast<JSObject>(this)->HasDictionaryElements();
+}
+
+void JSObjectLayout::RequireSlowElements(Tagged<NumberDictionary> dictionary) {
+  Cast<JSObject>(this)->RequireSlowElements(dictionary);
+}
+
+void JSObjectLayout::FastPropertyAtPut(FieldIndex index, Tagged<Object> value,
+                                       WriteBarrierMode mode) {
+  Cast<JSObject>(this)->FastPropertyAtPut(index, value, mode);
+}
+
+void JSObjectLayout::FastPropertyAtPut(FieldIndex index, Tagged<Object> value,
+                                       SeqCstAccessTag tag) {
+  Cast<JSObject>(this)->FastPropertyAtPut(index, value, tag);
+}
+
+ElementsAccessor* JSObjectLayout::GetElementsAccessor() const {
+  return Cast<JSObject>(this)->GetElementsAccessor();
+}
+
+Tagged<NumberDictionary> JSObjectLayout::element_dictionary() const {
+  return Cast<JSObject>(this)->element_dictionary();
+}
+
+void JSReceiverLayout::set_raw_properties_or_hash(Tagged<Object> value,
+                                                  WriteBarrierMode mode) {
+  Cast<JSReceiver>(this)->set_raw_properties_or_hash(value, mode);
+}
+
+void JSReceiverLayout::set_raw_properties_or_hash(Tagged<Object> value,
+                                                  RelaxedStoreTag tag,
+                                                  WriteBarrierMode mode) {
+  Cast<JSReceiver>(this)->set_raw_properties_or_hash(value, tag, mode);
+}
+
+void JSReceiverLayout::SetProperties(Tagged<HeapObject> properties) {
+  Cast<JSReceiver>(this)->SetProperties(properties);
+}
+
+// static
+Maybe<bool> JSReceiverLayout::OrdinaryDefineOwnProperty(
+    Isolate* isolate, DirectHandle<JSObject> object, DirectHandle<Object> key,
+    PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw) {
+  return JSReceiver::OrdinaryDefineOwnProperty(isolate, object, key, desc,
+                                               should_throw);
+}
+
+// static
+Maybe<bool> JSReceiverLayout::IsCompatiblePropertyDescriptor(
+    Isolate* isolate, bool extensible, PropertyDescriptor* desc,
+    PropertyDescriptor* current, DirectHandle<Name> property_name,
+    Maybe<ShouldThrow> should_throw) {
+  return JSReceiver::IsCompatiblePropertyDescriptor(
+      isolate, extensible, desc, current, property_name, should_throw);
+}
+
+// static
+Maybe<bool> JSReceiverLayout::GetOwnPropertyDescriptor(
+    Isolate* isolate, DirectHandle<JSReceiver> object, DirectHandle<Object> key,
+    PropertyDescriptor* desc) {
+  return JSReceiver::GetOwnPropertyDescriptor(isolate, object, key, desc);
+}
+
+bool JSReceiverLayout::HasFastProperties() const {
+  return Cast<JSReceiver>(this)->HasFastProperties();
+}
+
+Tagged<NameDictionary> JSReceiverLayout::property_dictionary() const {
+  return Cast<JSReceiver>(this)->property_dictionary();
+}
+Tagged<NameDictionary> JSReceiverLayout::property_dictionary(
+    PtrComprCageBase cage_base) const {
+  return Cast<JSReceiver>(this)->property_dictionary(cage_base);
+}
+
+Tagged<SwissNameDictionary> JSReceiverLayout::property_dictionary_swiss()
+    const {
+  return Cast<JSReceiver>(this)->property_dictionary_swiss();
+}
+Tagged<SwissNameDictionary> JSReceiverLayout::property_dictionary_swiss(
+    PtrComprCageBase cage_base) const {
+  return Cast<JSReceiver>(this)->property_dictionary_swiss(cage_base);
+}
+
+void JSReceiverLayout::initialize_properties(Isolate* isolate) {
+  Cast<JSReceiver>(this)->initialize_properties(isolate);
+}
+
+std::optional<Tagged<NativeContext>> JSReceiverLayout::GetCreationContext()
+    const {
+  return Cast<JSReceiver>(this)->GetCreationContext();
+}
+
+MaybeDirectHandle<NativeContext> JSReceiverLayout::GetCreationContext(
+    Isolate* isolate) const {
+  return Cast<JSReceiver>(this)->GetCreationContext(isolate);
+}
+
+Tagged<Object> JSObject::InObjectPropertyPutAtIndex(int index,
+                                                    Tagged<Object> value,
+                                                    WriteBarrierMode mode) {
   // Adjust for the number of properties stored in the object.
-  int offset = GetInObjectPropertyOffset(index);
+  return InObjectPropertyPutAtOffset(GetInObjectPropertyOffset(index), value,
+                                     mode);
+}
+
+Tagged<Object> JSObject::InObjectPropertyPutAtOffset(int offset,
+                                                     Tagged<Object> value,
+                                                     WriteBarrierMode mode) {
+  DCHECK_GE(offset, GetInObjectPropertyOffset(0));
+  DCHECK_LT(offset, Size());
   WRITE_FIELD(*this, offset, value);
   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
   return value;
@@ -687,8 +845,6 @@ JSObject::DefineOwnPropertyIgnoreAttributes(LookupIterator* it,
   return value;
 }
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSExternalObject)
-
 void* JSExternalObject::value(ExternalPointerTagRange tag_range) const {
   i::IsolateForSandbox isolate = GetCurrentIsolateForSandbox();
   return value(isolate, tag_range);
@@ -696,22 +852,100 @@ void* JSExternalObject::value(ExternalPointerTagRange tag_range) const {
 
 void* JSExternalObject::value(i::IsolateForSandbox isolate,
                               ExternalPointerTagRange tag_range) const {
-  Address result =
-      HeapObject::ReadExternalPointerField(kValueOffset, isolate, tag_range);
+  // Accessors take a runtime tag / tag_range (callers pick it dynamically
+  // based on v8::External tag values); ExternalPointerMember's template
+  // member variants require compile-time tags, so route through the
+  // field_address-based free functions instead.
+  Address result = ::v8::internal::ReadExternalPointerField(
+      value_.storage_address(), isolate, tag_range);
   return reinterpret_cast<void*>(result);
 }
 
 void JSExternalObject::init_value(i::IsolateForSandbox isolate,
                                   ExternalPointerTag tag, void* initial_value) {
-  Address the_value = reinterpret_cast<Address>(initial_value);
-  HeapObject::InitExternalPointerField(kValueOffset, isolate, tag, the_value);
+  ::v8::internal::InitExternalPointerField(
+      reinterpret_cast<Address>(this), value_.storage_address(), isolate, tag,
+      reinterpret_cast<Address>(initial_value));
 }
 
 void JSExternalObject::set_value(i::IsolateForSandbox isolate,
                                  ExternalPointerTag tag, void* value) {
-  Address the_value = reinterpret_cast<Address>(value);
-  HeapObject::WriteExternalPointerField(kValueOffset, isolate, tag, the_value);
+  ::v8::internal::WriteExternalPointerField(
+      value_.storage_address(), isolate, tag, reinterpret_cast<Address>(value));
 }
+
+Tagged<String> JSStringIterator::string() const { return string_.load(); }
+
+void JSStringIterator::set_string(Tagged<String> value, WriteBarrierMode mode) {
+  string_.store(this, value, mode);
+}
+
+int JSStringIterator::index() const { return index_.load().value(); }
+
+void JSStringIterator::set_index(int value) {
+  index_.store(this, Smi::FromInt(value));
+}
+
+Tagged<JSReceiver> JSAsyncFromSyncIterator::sync_iterator() const {
+  return sync_iterator_.load();
+}
+
+void JSAsyncFromSyncIterator::set_sync_iterator(Tagged<JSReceiver> value,
+                                                WriteBarrierMode mode) {
+  sync_iterator_.store(this, value, mode);
+}
+
+Tagged<Object> JSAsyncFromSyncIterator::next() const { return next_.load(); }
+
+void JSAsyncFromSyncIterator::set_next(Tagged<Object> value,
+                                       WriteBarrierMode mode) {
+  next_.store(this, value, mode);
+}
+
+Tagged<JSAny> JSPrimitiveWrapper::value() const { return value_.load(); }
+
+void JSPrimitiveWrapper::set_value(Tagged<JSAny> value, WriteBarrierMode mode) {
+  value_.store(this, value, mode);
+}
+
+Tagged<JSReceiver> JSValidIteratorWrapper::underlying_object() const {
+  return underlying_object_.load();
+}
+
+void JSValidIteratorWrapper::set_underlying_object(Tagged<JSReceiver> value,
+                                                   WriteBarrierMode mode) {
+  underlying_object_.store(this, value, mode);
+}
+
+Tagged<JSAny> JSValidIteratorWrapper::underlying_next() const {
+  return underlying_next_.load();
+}
+
+void JSValidIteratorWrapper::set_underlying_next(Tagged<JSAny> value,
+                                                 WriteBarrierMode mode) {
+  underlying_next_.store(this, value, mode);
+}
+
+double JSDate::value() const { return value_.value(); }
+void JSDate::set_value(double v) { value_.set_value(v); }
+
+#define DEFINE_JSDATE_CACHED_ACCESSOR(name)                       \
+  Tagged<UnionOf<Smi, HeapNumber>> JSDate::name() const {         \
+    return name##_.load();                                        \
+  }                                                               \
+  void JSDate::set_##name(Tagged<UnionOf<Smi, HeapNumber>> value, \
+                          WriteBarrierMode mode) {                \
+    name##_.store(this, value, mode);                             \
+  }
+DEFINE_JSDATE_CACHED_ACCESSOR(year)
+DEFINE_JSDATE_CACHED_ACCESSOR(month)
+DEFINE_JSDATE_CACHED_ACCESSOR(day)
+DEFINE_JSDATE_CACHED_ACCESSOR(weekday)
+DEFINE_JSDATE_CACHED_ACCESSOR(hour)
+DEFINE_JSDATE_CACHED_ACCESSOR(min)
+DEFINE_JSDATE_CACHED_ACCESSOR(sec)
+DEFINE_JSDATE_CACHED_ACCESSOR(cache_stamp)
+#undef DEFINE_JSDATE_CACHED_ACCESSOR
 
 bool JSMessageObject::DidEnsureSourcePositionsAvailable() const {
   return shared_info() == Smi::zero();
@@ -747,12 +981,63 @@ void JSMessageObject::set_type(MessageTemplate value) {
   set_raw_type(static_cast<int>(value));
 }
 
-ACCESSORS(JSMessageObject, shared_info, Tagged<Object>, kSharedInfoOffset)
-ACCESSORS(JSMessageObject, bytecode_offset, Tagged<Smi>, kBytecodeOffsetOffset)
-SMI_ACCESSORS(JSMessageObject, start_position, kStartPositionOffset)
-SMI_ACCESSORS(JSMessageObject, end_position, kEndPositionOffset)
-SMI_ACCESSORS(JSMessageObject, error_level, kErrorLevelOffset)
-SMI_ACCESSORS(JSMessageObject, raw_type, kMessageTypeOffset)
+Tagged<Object> JSMessageObject::shared_info() const {
+  return shared_info_.load();
+}
+void JSMessageObject::set_shared_info(Tagged<Object> value,
+                                      WriteBarrierMode mode) {
+  shared_info_.store(this, Cast<UnionOf<SharedFunctionInfo, Smi>>(value), mode);
+}
+
+Tagged<Smi> JSMessageObject::bytecode_offset() const {
+  return bytecode_offset_.load();
+}
+void JSMessageObject::set_bytecode_offset(Tagged<Smi> value) {
+  bytecode_offset_.store(this, value);
+}
+
+int JSMessageObject::start_position() const {
+  return start_position_.load().value();
+}
+void JSMessageObject::set_start_position(int value) {
+  start_position_.store(this, Smi::FromInt(value));
+}
+
+int JSMessageObject::end_position() const {
+  return end_position_.load().value();
+}
+void JSMessageObject::set_end_position(int value) {
+  end_position_.store(this, Smi::FromInt(value));
+}
+
+int JSMessageObject::error_level() const { return error_level_.load().value(); }
+void JSMessageObject::set_error_level(int value) {
+  error_level_.store(this, Smi::FromInt(value));
+}
+
+int JSMessageObject::raw_type() const { return message_type_.load().value(); }
+void JSMessageObject::set_raw_type(int value) {
+  message_type_.store(this, Smi::FromInt(value));
+}
+
+Tagged<Object> JSMessageObject::argument() const { return argument_.load(); }
+void JSMessageObject::set_argument(Tagged<Object> value,
+                                   WriteBarrierMode mode) {
+  argument_.store(this, value, mode);
+}
+
+Tagged<Script> JSMessageObject::script() const { return script_.load(); }
+void JSMessageObject::set_script(Tagged<Script> value, WriteBarrierMode mode) {
+  script_.store(this, value, mode);
+}
+
+Tagged<UnionOf<StackTraceInfo, Hole>> JSMessageObject::stack_trace() const {
+  return stack_trace_.load();
+}
+void JSMessageObject::set_stack_trace(
+    Tagged<UnionOf<StackTraceInfo, Hole>> value, WriteBarrierMode mode) {
+  stack_trace_.store(this, value, mode);
+}
 
 DEF_GETTER(JSObject, GetElementsKind, ElementsKind) {
   ElementsKind kind = map(cage_base)->elements_kind();
@@ -890,6 +1175,10 @@ RELEASE_ACQUIRE_ACCESSORS_CHECKED2(JSGlobalObject, global_dictionary,
                                    kPropertiesOrHashOffset,
                                    !HasFastProperties(cage_base), true)
 
+DEF_GETTER(JSGlobalObject, raw_global_proxy, Tagged<HeapObject>) {
+  return TaggedField<HeapObject, kGlobalProxyOffset>::load(cage_base, *this);
+}
+
 DEF_GETTER(JSObject, element_dictionary, Tagged<NumberDictionary>) {
   DCHECK(HasDictionaryElements(cage_base) ||
          HasSlowStringWrapperElements(cage_base));
@@ -973,7 +1262,7 @@ void JSObject::EnsureWritableFastElements(Isolate* isolate,
   }
 }
 
-std::optional<Tagged<NativeContext>> JSReceiver::GetCreationContext() {
+std::optional<Tagged<NativeContext>> JSReceiver::GetCreationContext() const {
   DisallowGarbageCollection no_gc;
   Tagged<Map> meta_map = map()->map();
   DCHECK(IsMapMap(meta_map));
@@ -984,7 +1273,7 @@ std::optional<Tagged<NativeContext>> JSReceiver::GetCreationContext() {
 }
 
 MaybeDirectHandle<NativeContext> JSReceiver::GetCreationContext(
-    Isolate* isolate) {
+    Isolate* isolate) const {
   DisallowGarbageCollection no_gc;
   std::optional<Tagged<NativeContext>> maybe_context = GetCreationContext();
   if (!maybe_context.has_value()) return {};
@@ -1013,7 +1302,7 @@ Maybe<bool> JSReceiver::HasPropertyOrElement(Isolate* isolate,
 
 Maybe<bool> JSReceiver::HasOwnProperty(Isolate* isolate,
                                        DirectHandle<JSReceiver> object,
-                                       uint32_t index) {
+                                       size_t index) {
   if (IsJSObject(*object)) {  // Shortcut.
     LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
     return HasProperty(&it);
@@ -1042,7 +1331,7 @@ Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
-    Isolate* isolate, DirectHandle<JSReceiver> object, uint32_t index) {
+    Isolate* isolate, DirectHandle<JSReceiver> object, size_t index) {
   LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
   return GetPropertyAttributes(&it);
 }
@@ -1069,6 +1358,14 @@ bool JSGlobalObject::IsDetached() {
 
 bool JSGlobalProxy::IsDetachedFrom(Tagged<JSGlobalObject> global) const {
   return map()->prototype() != global;
+}
+
+bool JSGlobalProxy::IsDetached() const {
+  // Currently we expect a non-detached global proxy to have a non-null
+  // hidden prototype.
+  bool is_detached = IsNull(map()->prototype());
+  DCHECK_IMPLIES(is_detached, !GetCreationContext().has_value());
+  return is_detached;
 }
 
 inline int JSGlobalProxy::SizeWithEmbedderFields(int embedder_field_count) {

@@ -17,166 +17,166 @@
 namespace v8 {
 namespace internal {
 
-#ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
-// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
-#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(TSA_MACRO(__VA_ARGS__))
-#else
-// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
-#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(CSA_MACRO(__VA_ARGS__))
-#endif
-
 #define TORQUE_BUILTIN_LIST_TFC(V)                                            \
-  BUILTIN_LIST_FROM_TORQUE(IGNORE_BUILTIN, IGNORE_BUILTIN, V, IGNORE_BUILTIN, \
-                           IGNORE_BUILTIN, IGNORE_BUILTIN)
+  BUILTIN_LIST_FROM_TORQUE(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, V, \
+                           V, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
 
-#define INTERFACE_DESCRIPTOR_LIST(V)                 \
-  V(Abort)                                           \
-  V(AddStringConstantInternalizeWithVector)          \
-  V(AddStringConstantInternalizeTrampoline)          \
-  V(Allocate)                                        \
-  V(CallApiCallbackGeneric)                          \
-  V(CallApiCallbackOptimized)                        \
-  V(ApiGetter)                                       \
-  V(ArrayConstructor)                                \
-  V(ArrayNArgumentsConstructor)                      \
-  V(ArrayNoArgumentConstructor)                      \
-  V(ArraySingleArgumentConstructor)                  \
-  V(AsyncFunctionStackParameter)                     \
-  V(BaselineLeaveFrame)                              \
-  V(BaselineOutOfLinePrologue)                       \
-  V(BigIntToI32Pair)                                 \
-  V(BigIntToI64)                                     \
-  V(BinaryOp)                                        \
-  V(BinaryOp_Baseline)                               \
-  V(BinaryOp_WithFeedback)                           \
-  V(BinarySmiOp_Baseline)                            \
-  V(CallForwardVarargs)                              \
-  V(CallFunctionTemplate)                            \
-  V(CallFunctionTemplateGeneric)                     \
-  V(CallTrampoline)                                  \
-  V(CallTrampoline_Baseline)                         \
-  V(CallTrampoline_Baseline_Compact)                 \
-  V(CallTrampoline_WithFeedback)                     \
-  V(CallVarargs)                                     \
-  V(CallWithArrayLike)                               \
-  V(CallWithArrayLike_WithFeedback)                  \
-  V(CallWithSpread)                                  \
-  V(CallWithSpread_Baseline)                         \
-  V(CallWithSpread_WithFeedback)                     \
-  V(CEntryDummy)                                     \
-  V(CEntryForCPPBuiltin)                             \
-  V(CloneObjectBaseline)                             \
-  V(CloneObjectWithVector)                           \
-  V(Compare)                                         \
-  V(CompareNoContext)                                \
-  V(StringEqual)                                     \
-  V(Compare_Baseline)                                \
-  IF_SPARKPLUG_PLUS(V, CompareAndTryPatchCode)       \
-  V(Compare_WithFeedback)                            \
-  V(Compare_WithEmbeddedFeedback)                    \
-  V(Compare_WithEmbeddedFeedbackOffset)              \
-  V(Construct_Baseline)                              \
-  V(ConstructForwardVarargs)                         \
-  V(ConstructForwardAllArgs)                         \
-  V(ConstructForwardAllArgs_Baseline)                \
-  V(ConstructForwardAllArgs_WithFeedback)            \
-  V(ConstructStub)                                   \
-  V(ConstructVarargs)                                \
-  V(ConstructWithArrayLike)                          \
-  V(Construct_WithFeedback)                          \
-  V(ConstructWithSpread)                             \
-  V(ConstructWithSpread_Baseline)                    \
-  V(ConstructWithSpread_WithFeedback)                \
-  V(ContextOnly)                                     \
-  V(CopyDataPropertiesWithExcludedProperties)        \
-  V(CopyDataPropertiesWithExcludedPropertiesOnStack) \
-  V(CppBuiltinAdaptor)                               \
-  V(CreateFromSlowBoilerplateHelper)                 \
-  V(DefineKeyedOwn)                                  \
-  V(DefineKeyedOwnBaseline)                          \
-  V(DefineKeyedOwnWithVector)                        \
-  V(FastNewObject)                                   \
-  V(FindNonDefaultConstructorOrConstruct)            \
-  V(ForInPrepare)                                    \
-  V(GetIteratorStackParameter)                       \
-  V(GetProperty)                                     \
-  V(GrowArrayElements)                               \
-  V(I32PairToBigInt)                                 \
-  V(I64ToBigInt)                                     \
-  V(InterpreterCEntry1)                              \
-  V(InterpreterCEntry2)                              \
-  V(InterpreterDispatch)                             \
-  V(InterpreterPushArgsThenCall)                     \
-  V(InterpreterPushArgsThenConstruct)                \
-  V(JSEntry)                                         \
-  V(JSTrampoline)                                    \
-  V(KeyedHasICBaseline)                              \
-  V(KeyedHasICWithVector)                            \
-  V(KeyedLoad)                                       \
-  V(KeyedLoadBaseline)                               \
-  V(EnumeratedKeyedLoadBaseline)                     \
-  V(KeyedLoadWithVector)                             \
-  V(EnumeratedKeyedLoad)                             \
-  V(Load)                                            \
-  V(LoadBaseline)                                    \
-  V(LoadGlobal)                                      \
-  V(LoadGlobalBaseline)                              \
-  V(LoadGlobalNoFeedback)                            \
-  V(LoadGlobalWithVector)                            \
-  V(LoadNoFeedback)                                  \
-  V(LoadWithReceiverAndVector)                       \
-  V(LoadWithReceiverBaseline)                        \
-  V(LoadWithVector)                                  \
-  V(LookupWithVector)                                \
-  V(LookupTrampoline)                                \
-  V(LookupBaseline)                                  \
-  V(MaglevOptimizeCodeOrTailCallOptimizedCodeSlot)   \
-  V(NewHeapNumber)                                   \
-  V(NoContext)                                       \
-  V(OnStackReplacement)                              \
-  V(RegExpTrampoline)                                \
-  V(RestartFrameTrampoline)                          \
-  V(ResumeGenerator)                                 \
-  V(ResumeGeneratorBaseline)                         \
-  V(RunMicrotasks)                                   \
-  V(RunMicrotasksEntry)                              \
-  V(SingleParameterOnStack)                          \
-  V(Store)                                           \
-  V(StoreNoFeedback)                                 \
-  V(StoreBaseline)                                   \
-  V(StoreGlobal)                                     \
-  V(StoreGlobalBaseline)                             \
-  V(StoreGlobalWithVector)                           \
-  V(StoreTransition)                                 \
-  V(StoreWithVector)                                 \
-  V(StringAtAsString)                                \
-  V(StringSubstring)                                 \
-  V(SuspendGeneratorBaseline)                        \
-  V(TypeConversion)                                  \
-  V(TypeConversion_Baseline)                         \
-  V(TypeConversionNoContext)                         \
-  V(Typeof)                                          \
-  V(UnaryOp_Baseline)                                \
-  V(UnaryOp_WithFeedback)                            \
-  V(Void)                                            \
-  IF_WASM(V, WasmAllocateShared)                     \
-  IF_WASM(V, WasmFXResume)                           \
-  IF_WASM(V, WasmFXResumeThrow)                      \
-  IF_WASM(V, WasmFXSuspend)                          \
-  IF_WASM(V, WasmFXReturn)                           \
-  V(WasmDummy)                                       \
-  V(WasmFloat32ToNumber)                             \
-  V(WasmFloat64ToTagged)                             \
-  V(WasmJSToWasmWrapper)                             \
-  V(WasmToJSWrapper)                                 \
-  V(WasmSuspend)                                     \
-  V(WasmHandleStackOverflow)                         \
-  V(WriteBarrier)                                    \
-  V(IndirectPointerWriteBarrier)                     \
-  IF_TSA(V, IGNORE_BUILTIN, ToString)                \
-  IF_TSAN(V, TSANLoad)                               \
-  IF_TSAN(V, TSANStore)                              \
-  BUILTIN_LIST_TFS(V)                                \
+#define INTERFACE_DESCRIPTOR_LIST(V)                            \
+  V(Abort)                                                      \
+  V(AddStringConstantInternalizeWithVector)                     \
+  V(AddStringConstantInternalizeTrampoline)                     \
+  V(Allocate)                                                   \
+  V(CallApiCallbackGeneric)                                     \
+  V(CallApiCallbackOptimized)                                   \
+  V(CallApiGetter)                                              \
+  V(CallApiSetter)                                              \
+  V(ArrayConstructor)                                           \
+  V(ArrayNArgumentsConstructor)                                 \
+  V(ArrayNoArgumentConstructor)                                 \
+  V(ArraySingleArgumentConstructor)                             \
+  V(AsyncFunctionStackParameter)                                \
+  V(BaselineLeaveFrame)                                         \
+  V(BaselineOutOfLinePrologue)                                  \
+  V(BigIntToI32Pair)                                            \
+  V(BigIntToI64)                                                \
+  V(BinaryOp)                                                   \
+  V(BinaryOp_Baseline)                                          \
+  V(BinaryOp_WithFeedback)                                      \
+  V(BinarySmiOp_Baseline)                                       \
+  V(CallForwardVarargs)                                         \
+  V(CallFunctionTemplate)                                       \
+  V(CallFunctionTemplateGeneric)                                \
+  V(CallTrampoline)                                             \
+  V(CallTrampoline_Baseline)                                    \
+  V(CallTrampoline_Baseline_Compact)                            \
+  V(CallTrampoline_WithFeedback)                                \
+  V(CallVarargs)                                                \
+  V(CallWithArrayLike)                                          \
+  V(CallWithArrayLike_WithFeedback)                             \
+  V(CallWithSpread)                                             \
+  V(CallWithSpread_Baseline)                                    \
+  V(CallWithSpread_WithFeedback)                                \
+  V(CEntryDummy)                                                \
+  V(CEntryForCPPBuiltin)                                        \
+  V(CloneObjectBaseline)                                        \
+  V(CloneObjectWithVector)                                      \
+  V(Compare)                                                    \
+  V(CompareNoContext)                                           \
+  V(StringEqual)                                                \
+  V(Compare_Baseline)                                           \
+  IF_SPARKPLUG_PLUS(V, CompareAndTryPatchCode)                  \
+  V(Compare_WithFeedback)                                       \
+  V(Compare_WithEmbeddedFeedback)                               \
+  V(Compare_WithEmbeddedFeedbackOffset)                         \
+  V(Construct_Baseline)                                         \
+  V(ConstructForwardVarargs)                                    \
+  V(ConstructForwardAllArgs)                                    \
+  V(ConstructForwardAllArgs_Baseline)                           \
+  V(ConstructForwardAllArgs_WithFeedback)                       \
+  V(ConstructStub)                                              \
+  V(ConstructVarargs)                                           \
+  V(ConstructWithArrayLike)                                     \
+  V(Construct_WithFeedback)                                     \
+  V(ConstructWithSpread)                                        \
+  V(ConstructWithSpread_Baseline)                               \
+  V(ConstructWithSpread_WithFeedback)                           \
+  V(ContextOnly)                                                \
+  V(CopyDataPropertiesWithExcludedProperties)                   \
+  V(CopyDataPropertiesWithExcludedPropertiesOnStack)            \
+  V(CppBuiltinAdaptor)                                          \
+  V(CreateFromSlowBoilerplateHelper)                            \
+  V(DefineKeyedOwn)                                             \
+  V(DefineKeyedOwnBaseline)                                     \
+  V(DefineKeyedOwnWithVector)                                   \
+  V(FastNewObject)                                              \
+  V(FindNonDefaultConstructorOrConstruct)                       \
+  V(ForInPrepare)                                               \
+  V(ForOfNextResultDeoptContinuation)                           \
+  V(ForOfNextLoadDoneLazyDeoptContinuation)                     \
+  V(ForOfNextLoadValueEagerDeoptContinuation)                   \
+  V(ForOfNextLoadValueLazyDeoptContinuation)                    \
+  V(GetIteratorStackParameter)                                  \
+  V(GetProperty)                                                \
+  V(GrowArrayElements)                                          \
+  V(I32PairToBigInt)                                            \
+  V(I64ToBigInt)                                                \
+  V(InterpreterCEntry1)                                         \
+  V(InterpreterCEntry2)                                         \
+  V(InterpreterDispatch)                                        \
+  V(InterpreterPushArgsThenCall)                                \
+  V(InterpreterPushArgsThenConstruct)                           \
+  V(JSEntry)                                                    \
+  V(JSTrampoline)                                               \
+  V(KeyedHasICBaseline)                                         \
+  V(KeyedHasICWithVector)                                       \
+  V(KeyedLoad)                                                  \
+  V(KeyedLoadBaseline)                                          \
+  V(EnumeratedKeyedLoadBaseline)                                \
+  V(KeyedLoadWithVector)                                        \
+  V(EnumeratedKeyedLoad)                                        \
+  V(Load)                                                       \
+  V(LoadBaseline)                                               \
+  V(LoadGlobal)                                                 \
+  V(LoadGlobalBaseline)                                         \
+  V(LoadGlobalNoFeedback)                                       \
+  V(LoadGlobalWithVector)                                       \
+  V(LoadNoFeedback)                                             \
+  V(LoadWithReceiverAndVector)                                  \
+  V(LoadWithReceiverBaseline)                                   \
+  V(LoadWithVector)                                             \
+  V(LookupWithVector)                                           \
+  V(LookupTrampoline)                                           \
+  V(LookupBaseline)                                             \
+  V(MaglevOptimizeCodeOrTailCallOptimizedCodeSlot)              \
+  V(NewHeapNumber)                                              \
+  V(NoContext)                                                  \
+  V(OnStackReplacement)                                         \
+  V(RegExpTrampoline)                                           \
+  V(RestartFrameTrampoline)                                     \
+  V(ResumeGenerator)                                            \
+  V(ResumeGeneratorBaseline)                                    \
+  V(RunMicrotasks)                                              \
+  V(RunMicrotasksEntry)                                         \
+  V(SingleParameterOnStack)                                     \
+  V(GeneratorNextLazyDeoptContinuation)                         \
+  V(Store)                                                      \
+  V(StoreNoFeedback)                                            \
+  V(StoreBaseline)                                              \
+  V(StoreGlobal)                                                \
+  V(StoreGlobalBaseline)                                        \
+  V(StoreGlobalWithVector)                                      \
+  V(StoreTransition)                                            \
+  V(StoreWithVector)                                            \
+  V(StringAtAsString)                                           \
+  V(StringSubstring)                                            \
+  V(SuspendGeneratorBaseline)                                   \
+  V(TypeConversion)                                             \
+  V(TypeConversion_Baseline)                                    \
+  V(TypeConversionNoContext)                                    \
+  V(Typeof)                                                     \
+  V(UnaryOp_Baseline)                                           \
+  V(UnaryOp_WithFeedback)                                       \
+  V(Void)                                                       \
+  IF_WASM(V, WasmAllocateShared)                                \
+  IF_WASM(V, WasmFXResume)                                      \
+  IF_WASM(V, WasmFXResumeThrow)                                 \
+  IF_WASM(V, WasmFXResumeThrowRef)                              \
+  IF_WASM(V, WasmFXSuspend)                                     \
+  IF_WASM(V, WasmFXSwitch)                                      \
+  IF_WASM(V, WasmFXReturn)                                      \
+  V(WasmDummy)                                                  \
+  V(WasmFloat32ToNumber)                                        \
+  V(WasmFloat64ToTagged)                                        \
+  V(WasmJSToWasmWrapper)                                        \
+  V(WasmToJSWrapper)                                            \
+  V(WasmSuspend)                                                \
+  V(WasmHandleStackOverflow)                                    \
+  V(WriteBarrier)                                               \
+  V(IndirectPointerWriteBarrier)                                \
+  SELECT_TSA_LEVEL(IGNORE_BUILTIN, V, IGNORE_BUILTIN, ToString) \
+  IF_TSAN(V, TSANLoad)                                          \
+  IF_TSAN(V, TSANStore)                                         \
+  BUILTIN_LIST_TFS(V)                                           \
   TORQUE_BUILTIN_LIST_TFC(V)
 
 enum class StackArgumentOrder {
@@ -952,19 +952,57 @@ class WasmFXResumeThrowDescriptor final
   static constexpr inline auto registers();
 };
 
+class WasmFXResumeThrowRefDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmFXResumeThrowRefDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(1, kTargetStack, kExnRef)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::IntPtr(),         // Return: result buffer.
+      MachineType::IntPtr(),         // Param 0: target stack.
+      MachineType::TaggedPointer())  // Param 1: exnref.
+  DECLARE_DESCRIPTOR(WasmFXResumeThrowRefDescriptor)
+
+  static constexpr int kMaxRegisterParams = 2;
+  static constexpr inline auto registers();
+};
+
 class WasmFXSuspendDescriptor final
     : public StaticCallInterfaceDescriptor<WasmFXSuspendDescriptor> {
   INTERNAL_DESCRIPTOR()
   SANDBOXING_MODE(kSandboxed)
-  DEFINE_RESULT_AND_PARAMETERS(1, kTag, kContinuation, kArgBuffer)
+  DEFINE_RESULT_AND_PARAMETERS(1, kTag, kContinuation, kArgBuffer, kSig)
   DEFINE_RESULT_AND_PARAMETER_TYPES(
       MachineType::IntPtr(),         // Result: arg buffer
       MachineType::TaggedPointer(),  // Param 0: tag.
       MachineType::TaggedPointer(),  // Param 1: continuation.
-      MachineType::IntPtr())         // Param 2: arg buffer.
+      MachineType::IntPtr(),         // Param 2: arg buffer.
+      MachineType::Int32())          // Param 3: canonical sig index.
   DECLARE_DESCRIPTOR(WasmFXSuspendDescriptor)
 
+  static constexpr bool kNoStackScan = true;
   static constexpr int kMaxRegisterParams = 3;
+  static constexpr inline auto registers();
+};
+
+class WasmFXSwitchDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmFXSwitchDescriptor> {
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kTag, kContinuation, kTargetStack, kArgBuffer,
+                               kSig)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::IntPtr(),         // Result: arg buffer
+      MachineType::TaggedPointer(),  // Param 0: tag.
+      MachineType::TaggedPointer(),  // Param 1: continuation.
+      MachineType::IntPtr(),         // Param 2: target stack.
+      MachineType::IntPtr(),         // Param 3: arg buffer.
+      MachineType::Int32())          // Param 4: canonical sig index.
+  DECLARE_DESCRIPTOR(WasmFXSwitchDescriptor)
+
+  static constexpr bool kNoStackScan = true;
+  static constexpr int kMaxRegisterParams = 4;
   static constexpr inline auto registers();
 };
 
@@ -1766,6 +1804,19 @@ class SingleParameterOnStackDescriptor final
   static constexpr auto registers();
 };
 
+class GeneratorNextLazyDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          GeneratorNextLazyDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_PARAMETERS(kGenerator, kResult)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(), MachineType::AnyTagged())
+  DECLARE_DESCRIPTOR(GeneratorNextLazyDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
 class AsyncFunctionStackParameterDescriptor final
     : public StaticCallInterfaceDescriptor<
           AsyncFunctionStackParameterDescriptor> {
@@ -1789,6 +1840,67 @@ class GetIteratorStackParameterDescriptor final
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(), MachineType::AnyTagged(),
                          MachineType::AnyTagged(), MachineType::AnyTagged())
   DECLARE_DESCRIPTOR(GetIteratorStackParameterDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextResultDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextResultDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kValueDoneReg, kResultObject)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged(),  // kValueDoneReg
+                                    MachineType::AnyTagged())  // kResultObject
+  DECLARE_DESCRIPTOR(ForOfNextResultDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadDoneLazyDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadDoneLazyDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kResultObject, kValueDoneReg, kDone)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged(),  // kResultObject
+                                    MachineType::AnyTagged(),  // kValueDoneReg
+                                    MachineType::AnyTagged())  // kDone
+  DECLARE_DESCRIPTOR(ForOfNextLoadDoneLazyDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadValueEagerDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadValueEagerDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kResultObject, kValueDoneReg)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged(),  // kResultObject
+                                    MachineType::AnyTagged())  // kValueDoneReg
+  DECLARE_DESCRIPTOR(ForOfNextLoadValueEagerDeoptContinuationDescriptor)
+
+  static constexpr auto registers();
+};
+
+class ForOfNextLoadValueLazyDeoptContinuationDescriptor final
+    : public StaticCallInterfaceDescriptor<
+          ForOfNextLoadValueLazyDeoptContinuationDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_RESULT_AND_PARAMETERS(1, kValueDoneReg, kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result value
+                                    MachineType::AnyTagged(),  // kValueDoneReg
+                                    MachineType::AnyTagged())  // kValue
+  DECLARE_DESCRIPTOR(ForOfNextLoadValueLazyDeoptContinuationDescriptor)
 
   static constexpr auto registers();
 };
@@ -2394,24 +2506,67 @@ class CallApiCallbackGenericDescriptor
   static constexpr inline auto registers();
 };
 
-class ApiGetterDescriptor
-    : public StaticCallInterfaceDescriptor<ApiGetterDescriptor> {
+class CallApiGetterDescriptor
+    : public StaticCallInterfaceDescriptor<CallApiGetterDescriptor> {
  public:
   INTERNAL_DESCRIPTOR()
   SANDBOXING_MODE(kSandboxed)
 
   static constexpr auto kStackArgumentOrder = StackArgumentOrder::kLowToHigh;
-  DEFINE_PARAMETERS(kCallback,
-                    // stack arguments
-                    kHolder,    // sp[0]
-                    kReceiver)  // sp[1]
+  // On arm64 both parameters are passed on the stack to keep it aligned.
+  // We keep passing the callback value in register on non-arm64 architectures
+  // because we need to load the C++ function pointer from it.
+  //
+  //                               |  Non-arm64   |    arm64
+  //                               +--------------+--------------
+  DEFINE_PARAMETERS(kName,      // |  reg         |    reg
+                    kCallback,  // |  reg         |    sp[0]
+                    kHolder)    // |  sp[0]       |    sp[1]
 
-  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kCallback
-                         MachineType::AnyTagged(),  // kHolder
-                         MachineType::AnyTagged())  // kReceiver
-  DECLARE_DESCRIPTOR(ApiGetterDescriptor)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kName
+                         MachineType::AnyTagged(),  // kCallback
+                         MachineType::AnyTagged())  // kHolder
+  DECLARE_DESCRIPTOR(CallApiGetterDescriptor)
 
+  static constexpr inline Register NameRegister();
+#if !V8_TARGET_ARCH_ARM64
   static constexpr inline Register CallbackRegister();
+#endif
+
+  static constexpr auto registers();
+};
+
+class CallApiSetterDescriptor
+    : public StaticCallInterfaceDescriptor<CallApiSetterDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+
+  static constexpr auto kStackArgumentOrder = StackArgumentOrder::kLowToHigh;
+  // On arm64 both callback and holder parameters are passed on the stack to
+  // keep it aligned. We keep passing the callback value in register on
+  // non-arm64 architectures because we need to load the C++ function pointer
+  // from it.
+  //
+  //                                         |  Non-arm64   |    arm64
+  //                                         +--------------+--------------
+  DEFINE_PARAMETERS(kName,                // |  reg         |    reg
+                    kCallback,            // |  reg         |    sp[0]
+                    kHolder,              // |  sp[0]       |    sp[1]
+                    kShouldThrowOnError,  // |  sp[1]       |    sp[2]
+                    kValue)               // |  sp[2]       |    sp[3]
+
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kName
+                         MachineType::AnyTagged(),  // kCallback
+                         MachineType::AnyTagged(),  // kHolder
+                         MachineType::AnyTagged(),  // kShouldThrowOnError
+                         MachineType::AnyTagged())  // kValue
+  DECLARE_DESCRIPTOR(CallApiSetterDescriptor)
+
+  static constexpr inline Register NameRegister();
+#if !V8_TARGET_ARCH_ARM64
+  static constexpr inline Register CallbackRegister();
+#endif
 
   static constexpr auto registers();
 };
@@ -3048,6 +3203,7 @@ class CheckTurboshaftFloat64TypeDescriptor
 };
 
 #ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
+#ifndef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
 class ToStringDescriptor
     : public StaticCallInterfaceDescriptor<ToStringDescriptor> {
  public:
@@ -3058,6 +3214,7 @@ class ToStringDescriptor
                                     MachineType::AnyTagged())
   DECLARE_DEFAULT_DESCRIPTOR(ToStringDescriptor)
 };
+#endif  // !V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
 #endif  // V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
 
 #define DEFINE_DEBUG_PRINT_BUILTIN_DESCRIPTOR(Name, Type)                    \

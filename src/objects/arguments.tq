@@ -14,18 +14,20 @@ macro IsJSArgumentsObjectWithLength(
 }
 
 // Just a starting shape for JSObject; properties can move after initialization.
+@doNotGenerateCppClass
 extern shape JSSloppyArgumentsObject extends JSArgumentsObject {
   length: JSAny;
   callee: JSAny;
 }
 
 // Just a starting shape for JSObject; properties can move after initialization.
+@doNotGenerateCppClass
 extern shape JSStrictArgumentsObject extends JSArgumentsObject {
   length: JSAny;
 }
 
 @cppObjectLayoutDefinition
-class SloppyArgumentsElements extends FixedArrayBase {
+extern class SloppyArgumentsElements extends FixedArrayBase {
   context: Context;
   arguments: FixedArray|NumberDictionary;
   mapped_entries[length]: Smi|TheHole;
@@ -34,10 +36,16 @@ class SloppyArgumentsElements extends FixedArrayBase {
 macro NewSloppyArgumentsElements<Iterator: type>(
     length: Smi, context: Context, arguments: FixedArray,
     it: Iterator): SloppyArgumentsElements {
-  return new
-  SloppyArgumentsElements{length, context, arguments, mapped_entries: ...it};
+  return new SloppyArgumentsElements{
+    map: %GetClassMapConstant<SloppyArgumentsElements>(),
+    length,
+    context,
+    arguments,
+    mapped_entries: ...it
+  };
 }
 
+@cppObjectLayoutDefinition
 extern class AliasedArgumentsEntry extends Struct {
   aliased_context_slot: Smi;
 }

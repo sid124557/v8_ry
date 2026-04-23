@@ -16,6 +16,7 @@
 #include "src/objects/contexts.h"
 #include "src/objects/descriptor-array-inl.h"
 #include "src/objects/instance-type-inl.h"
+#include "src/objects/instance-type.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -338,7 +339,7 @@ class TurbolevEarlyLoweringReducer : public Next {
       }
       // Skip over in-object fields.
       // TODO(leszeks): We could make this smarter, like a binary search.
-      if (details.field_index() < in_object_length) {
+      if (details.is_in_object()) {
         continue;
       }
       first_out_of_object_descriptor = i;
@@ -362,13 +363,20 @@ class TurbolevEarlyLoweringReducer : public Next {
         ++descriptor;
         details = descs.GetPropertyDetails(descriptor);
       }
-      DCHECK_EQ(i, details.field_index() - in_object_length);
-      Representation r = details.representation();
+      DCHECK(!details.is_in_object());
+      DCHECK_EQ(i, PropertyArray::OffsetInWordsToIndex(details.field_offset()));
+      Representation repr = details.representation();
+
+      MapRef field_owner_map = old_map.FindFieldOwner(broker_, descriptor);
+      broker_->dependencies()->DependOnFieldRepresentation(
+          old_map, field_owner_map, descriptor, repr);
 
       V<Object> old_value = __ template LoadField<Object>(
-          old_property_array, AccessBuilder::ForPropertyArraySlot(i, r));
+          old_property_array,
+          AccessBuilder::ForPropertyArraySlot(i, repr, true));
       __ InitializeField(new_property_array,
-                         AccessBuilder::ForPropertyArraySlot(i, r), old_value);
+                         AccessBuilder::ForPropertyArraySlot(i, repr, true),
+                         old_value);
     }
 
     // Initialize new properties to undefined.
@@ -376,7 +384,7 @@ class TurbolevEarlyLoweringReducer : public Next {
     for (int i = 0; i < JSObject::kFieldsAdded; ++i) {
       __ InitializeField(new_property_array,
                          AccessBuilder::ForPropertyArraySlot(
-                             old_length + i, Representation::Tagged()),
+                             old_length + i, Representation::Tagged(), true),
                          undefined);
     }
 
@@ -422,7 +430,7 @@ class TurbolevEarlyLoweringReducer : public Next {
                       base::SmallVector<OpIndex, 32> parameters_and_registers,
                       int suspend_id, int bytecode_offset) {
     V<FixedArray> array = __ template LoadTaggedField<FixedArray>(
-        generator, JSGeneratorObject::kParametersAndRegistersOffset);
+        generator, offsetof(JSGeneratorObject, parameters_and_registers_));
     for (int i = 0; static_cast<size_t>(i) < parameters_and_registers.size();
          i++) {
       __ Store(array, parameters_and_registers[i], StoreOp::Kind::TaggedBase(),
@@ -433,16 +441,44 @@ class TurbolevEarlyLoweringReducer : public Next {
     __ Store(generator, __ SmiConstant(Smi::FromInt(suspend_id)),
              StoreOp::Kind::TaggedBase(), MemoryRepresentation::TaggedSigned(),
              WriteBarrierKind::kNoWriteBarrier,
-             JSGeneratorObject::kContinuationOffset);
+             offsetof(JSGeneratorObject, continuation_));
     __ Store(generator, __ SmiConstant(Smi::FromInt(bytecode_offset)),
              StoreOp::Kind::TaggedBase(), MemoryRepresentation::TaggedSigned(),
              WriteBarrierKind::kNoWriteBarrier,
-             JSGeneratorObject::kInputOrDebugPosOffset);
+             offsetof(JSGeneratorObject, input_or_debug_pos_));
 
     __ Store(generator, context, StoreOp::Kind::TaggedBase(),
              MemoryRepresentation::AnyTagged(),
              WriteBarrierKind::kFullWriteBarrier,
-             JSGeneratorObject::kContextOffset);
+             offsetof(JSGeneratorObject, context_));
+  }
+
+  V<Boolean> ObjectIsArray(V<Object> value, V<FrameState> frame_state,
+                           V<NativeContext> native_context,
+                           LazyDeoptOnThrow lazy_deopt_on_throw) {
+    Label<Boolean> done(this);
+
+    V<Boolean> true_bool = __ HeapConstant(factory_->true_value());
+    V<Boolean> false_bool = __ HeapConstant(factory_->false_value());
+
+    GOTO_IF(__ ObjectIsSmi(value), done, false_bool);
+
+    V<Map> map = __ LoadMapField(value);
+    V<Word32> instance_type = __ LoadInstanceTypeField(map);
+
+    // Check if {value} is a JSArray
+    GOTO_IF(__ Word32Equal(instance_type, JS_ARRAY_TYPE), done, true_bool);
+
+    // Check if {value} is not a JSProxy
+    GOTO_IF_NOT(__ Word32Equal(instance_type, JS_PROXY_TYPE), done, false_bool);
+
+    // {value} is a JSProxy, let the %ArrayIsArray runtime function dea with it.
+    GOTO(done, __ template CallRuntime<runtime::ArrayIsArray>(
+                   frame_state, native_context, {.input = value},
+                   lazy_deopt_on_throw));
+
+    BIND(done, result);
+    return result;
   }
 
  private:

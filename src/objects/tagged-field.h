@@ -96,6 +96,40 @@ class UnalignedDoubleMember : public UnalignedValueMember<double> {
 static_assert(alignof(UnalignedDoubleMember) == alignof(Tagged_t));
 static_assert(sizeof(UnalignedDoubleMember) == sizeof(double));
 
+// JSDispatchHandleMember stores a 32-bit JSDispatchHandle as a member of a
+// HeapObjectLayout subclass. Explicit padding must be added to the containing
+// class on builds with kTaggedSize == 8.
+class JSDispatchHandleMember {
+ public:
+  constexpr JSDispatchHandleMember() = default;
+
+  JSDispatchHandleMember(const JSDispatchHandleMember&) = delete;
+  JSDispatchHandleMember& operator=(const JSDispatchHandleMember&) = delete;
+
+  inline JSDispatchHandle Relaxed_Load() const;
+  inline JSDispatchHandle Acquire_Load() const;
+
+  // Resets the handle to kNullJSDispatchHandle. No write barrier (matches the
+  // semantics of clearing a dispatch handle on a dying object).
+  inline void Relaxed_Clear();
+
+  // Stores a new handle and emits the JSDispatchHandle write barrier.
+  inline void Relaxed_Store(HeapObjectLayout* host, JSDispatchHandle handle,
+                            WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  // Allocates a new dispatch-table entry, release-stores it into this member
+  // and emits the write barrier anchored on |host|. Mirrors
+  // HeapObject::AllocateAndInstallJSDispatchHandle.
+  template <typename ObjectType>
+  inline JSDispatchHandle AllocateAndInstall(
+      DirectHandle<ObjectType> host, Isolate* isolate, uint16_t parameter_count,
+      DirectHandle<Code> code, WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+ private:
+  std::atomic<uint32_t> storage_{0};
+};
+static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
+
 // FLEXIBLE_ARRAY_MEMBER(T, name) represents a marker for a variable-sized
 // suffix of members for a type.
 //
@@ -111,33 +145,13 @@ static_assert(sizeof(UnalignedDoubleMember) == sizeof(double));
 //   c) The similar zero-length array extension _also_ doesn't allow subclasses
 //      on some compilers (specifically, MSVC).
 //
-// On compilers that do support zero length arrays (i.e. not MSVC), we use one
+// All supported compilers support zero length arrays, so we use one
 // of these instead of `this` pointer fiddling. This gives LLVM better
 // information for optimization, and gives us the warnings we'd want to have
 // (e.g. only allowing one FAM in a class, ensuring that OFFSET_OF_DATA_START is
-// only used on classes with a FAM) on clang -- the MSVC version then doesn't
-// check the same constraints, and relies on the code being equivalent enough.
-#if V8_CC_MSVC && !defined(__clang__)
-// MSVC doesn't support zero length arrays in base classes. Cast the
-// one-past-this value to a zero length array reference, so that the return
-// values match that in GCC/clang.
-#define FLEXIBLE_ARRAY_MEMBER(Type, name)                     \
-  using FlexibleDataReturnType = Type[0];                     \
-  FlexibleDataReturnType& name() {                            \
-    static_assert(alignof(Type) <= alignof(decltype(*this))); \
-    using ReturnType = Type[0];                               \
-    return reinterpret_cast<ReturnType&>(*(this + 1));        \
-  }                                                           \
-  const FlexibleDataReturnType& name() const {                \
-    static_assert(alignof(Type) <= alignof(decltype(*this))); \
-    using ReturnType = Type[0];                               \
-    return reinterpret_cast<const ReturnType&>(*(this + 1));  \
-  }                                                           \
-  using FlexibleDataType = Type
-#else
-// GCC and clang allow zero length arrays in base classes. Return the zero
-// length array by reference, to avoid array-to-pointer decay which can lose
-// aliasing information.
+// only used on classes with a FAM) on clang.
+// Return the zero length array by reference, to avoid array-to-pointer decay
+// which can lose aliasing information.
 #define FLEXIBLE_ARRAY_MEMBER(Type, name)                                  \
   using FlexibleDataReturnType = Type[0];                                  \
   FlexibleDataReturnType& name() { return flexible_array_member_data_; }   \
@@ -158,15 +172,10 @@ static_assert(sizeof(UnalignedDoubleMember) == sizeof(double));
                                                                            \
  private:                                                                  \
   using FlexibleDataType = Type
-#endif
 
 // OFFSET_OF_DATA_START(T) returns the offset of the FLEXIBLE_ARRAY_MEMBER of
 // the class T.
-#if V8_CC_MSVC && !defined(__clang__)
-#define OFFSET_OF_DATA_START(Type) sizeof(Type)
-#else
 #define OFFSET_OF_DATA_START(Type) Type::template OffsetOfDataStart<Type>()
-#endif
 
 // This helper static class represents a tagged field of type T at offset
 // kFieldOffset inside some host HeapObject.

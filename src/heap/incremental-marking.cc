@@ -20,6 +20,7 @@
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/gc-tracer.h"
+#include "src/heap/heap-controller.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-visitor-inl.h"
@@ -158,7 +159,7 @@ void IncrementalMarking::Start(GarbageCollector garbage_collector,
     const size_t old_generation_allocated_mb =
         old_generation_size_mb + old_generation_waste_mb;
     const size_t old_generation_limit_mb =
-        heap()->old_generation_allocation_limit() / MB;
+        heap()->limits()->old_generation_allocation_limit() / MB;
     const size_t old_generation_slack_mb =
         old_generation_allocated_mb > old_generation_limit_mb
             ? 0
@@ -166,7 +167,8 @@ void IncrementalMarking::Start(GarbageCollector garbage_collector,
     const size_t global_size_mb = heap()->GlobalSizeOfObjects() / MB;
     const size_t global_waste_mb = heap()->GlobalWastedBytes() / MB;
     const size_t global_allocated_mb = global_size_mb + global_waste_mb;
-    const size_t global_limit_mb = heap()->global_allocation_limit() / MB;
+    const size_t global_limit_mb =
+        heap()->limits()->global_allocation_limit() / MB;
     const size_t global_slack_mb = global_allocated_mb > global_limit_mb
                                        ? 0
                                        : global_limit_mb - global_allocated_mb;
@@ -398,29 +400,6 @@ void IncrementalMarking::StartBlackAllocation() {
   }
 }
 
-void IncrementalMarking::PauseBlackAllocation() {
-  DCHECK(IsMajorMarking());
-  if (!v8_flags.black_allocated_pages) {
-    heap()->allocator()->UnmarkLinearAllocationsArea();
-
-    if (isolate()->is_shared_space_isolate()) {
-      isolate()->global_safepoint()->IterateSharedSpaceAndClientIsolates(
-          [](Isolate* client) {
-            client->heap()->UnmarkSharedLinearAllocationAreas();
-          });
-    }
-
-    heap()->safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
-      local_heap->UnmarkLinearAllocationsArea();
-    });
-  }
-  StopPointerTableBlackAllocation();
-  if (v8_flags.trace_incremental_marking) {
-    isolate()->PrintWithTimestamp(
-        "[IncrementalMarking] Black allocation paused\n");
-  }
-  black_allocation_ = false;
-}
 
 void IncrementalMarking::FinishBlackAllocation() {
   if (!black_allocation_) {
@@ -444,11 +423,18 @@ void IncrementalMarking::StartPointerTableBlackAllocation() {
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(true);
   heap()->trusted_pointer_space()->set_allocate_black(true);
-  if (isolate()->is_shared_space_isolate()) {
-    isolate()->shared_trusted_pointer_space()->set_allocate_black(true);
-  }
 #endif  // V8_ENABLE_SANDBOX
   heap()->js_dispatch_table_space()->set_allocate_black(true);
+
+  // Enable black allocation for shared spaces we own.
+  if (isolate()->owns_shareable_data()) {
+#ifdef V8_COMPRESS_POINTERS
+    isolate()->shared_external_pointer_space()->set_allocate_black(true);
+#endif  // V8_COMPRESS_POINTERS
+#ifdef V8_ENABLE_SANDBOX
+    isolate()->shared_trusted_pointer_space()->set_allocate_black(true);
+#endif  // V8_ENABLE_SANDBOX
+  }
 }
 
 void IncrementalMarking::StopPointerTableBlackAllocation() {
@@ -459,12 +445,18 @@ void IncrementalMarking::StopPointerTableBlackAllocation() {
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(false);
   heap()->trusted_pointer_space()->set_allocate_black(false);
-  if (isolate()->is_shared_space_isolate()) {
-    heap()->isolate()->shared_trusted_pointer_space()->set_allocate_black(
-        false);
-  }
 #endif  // V8_ENABLE_SANDBOX
   heap()->js_dispatch_table_space()->set_allocate_black(false);
+
+  // Disable black allocation for shared spaces we own.
+  if (isolate()->owns_shareable_data()) {
+#ifdef V8_COMPRESS_POINTERS
+    isolate()->shared_external_pointer_space()->set_allocate_black(false);
+#endif  // V8_COMPRESS_POINTERS
+#ifdef V8_ENABLE_SANDBOX
+    isolate()->shared_trusted_pointer_space()->set_allocate_black(false);
+#endif  // V8_ENABLE_SANDBOX
+  }
 }
 
 std::pair<v8::base::TimeDelta, size_t> IncrementalMarking::CppHeapStep(
@@ -494,8 +486,8 @@ bool IncrementalMarking::Stop() {
         static_cast<int>(heap()->OldGenerationSizeOfObjects() / MB);
     int old_generation_waste_mb =
         static_cast<int>(heap()->OldGenerationWastedBytes() / MB);
-    int old_generation_limit_mb =
-        static_cast<int>(heap()->old_generation_allocation_limit() / MB);
+    int old_generation_limit_mb = static_cast<int>(
+        heap()->limits()->old_generation_allocation_limit() / MB);
     isolate()->PrintWithTimestamp(
         "[IncrementalMarking] Stopping: old generation size %dMB, waste %dMB, "
         "limit %dMB, "
@@ -591,6 +583,16 @@ bool IncrementalMarking::ShouldWaitForTask() {
         wait_for_task ? "Delaying" : "Not delaying",
         (completion_task_timeout_ - now).InMillisecondsF());
   }
+  if (V8_UNLIKELY(heap_->is_gc_tracing_category_enabled())) {
+    TRACE_EVENT_INSTANT(
+        TRACE_DISABLED_BY_DEFAULT("v8.gc"), "V8.GCShouldWaitForTask", "value",
+        [this, wait_for_task, now](perfetto::TracedValue ctx) {
+          auto dict = std::move(ctx).WriteDictionary();
+          dict.Add("wait_for_task", wait_for_task);
+          dict.Add("remaining",
+                   (completion_task_timeout_ - now).InMillisecondsF());
+        });
+  }
   return wait_for_task;
 }
 
@@ -642,6 +644,32 @@ bool IncrementalMarking::TryInitializeTaskTimeout() {
             ? optional_time_to_current_task->InMillisecondsF()
             : NAN,
         allowed_overshoot.InMillisecondsF());
+  }
+  if (V8_UNLIKELY(heap_->is_gc_tracing_category_enabled())) {
+    TRACE_EVENT_INSTANT(
+        TRACE_DISABLED_BY_DEFAULT("v8.gc"), "V8.GCTryInitializeTaskTimeout",
+        "value",
+        [this, allowed_overshoot, delaying, now, kMinAllowedOvershoot,
+         kAllowedOvershootPercentBasedOnWalltime,
+         optional_avg_time_to_marking_task,
+         optional_time_to_current_task](perfetto::TracedValue ctx) {
+          auto dict = std::move(ctx).WriteDictionary();
+          dict.Add("delaying", delaying);
+          dict.Add("allowed_overshoot", allowed_overshoot.InMillisecondsF());
+          dict.Add("min_allowed_overshoot",
+                   kMinAllowedOvershoot.InMillisecondsF());
+          dict.Add("walltime", (now - start_time_).InMillisecondsF());
+          dict.Add("allowed_overshoot_based_on_walltime",
+                   kAllowedOvershootPercentBasedOnWalltime);
+          if (optional_avg_time_to_marking_task.has_value()) {
+            dict.Add("avg_time_to_marking_task",
+                     optional_avg_time_to_marking_task->InMillisecondsF());
+          }
+          if (optional_time_to_current_task.has_value()) {
+            dict.Add("time_to_current_task",
+                     optional_time_to_current_task->InMillisecondsF());
+          }
+        });
   }
   return delaying;
 }

@@ -8,16 +8,18 @@
 #include <memory>
 #include <vector>
 
+#include "include/cppgc/macros.h"
+#include "include/cppgc/persistent.h"
+#include "include/v8-inspector.h"
 #include "src/base/macros.h"
 #include "src/inspector/protocol/Forward.h"
 #include "src/inspector/protocol/Runtime.h"
 #include "src/inspector/protocol/Schema.h"
 
-#include "include/v8-inspector.h"
-
 namespace v8_inspector {
 
 class InjectedScript;
+class InspectedContext;
 class RemoteObjectIdBase;
 class V8ConsoleAgentImpl;
 class V8DebuggerAgentImpl;
@@ -35,7 +37,7 @@ class V8InspectorSessionImpl : public V8InspectorSession,
  public:
   static V8InspectorSessionImpl* create(
       V8InspectorImpl*, int contextGroupId, int sessionId,
-      V8Inspector::Channel*, StringView state,
+      V8Inspector::ManagedChannel*, StringView state,
       v8_inspector::V8Inspector::ClientTrustLevel,
       std::shared_ptr<V8DebuggerBarrier>);
   ~V8InspectorSessionImpl() override;
@@ -54,8 +56,12 @@ class V8InspectorSessionImpl : public V8InspectorSession,
   int contextGroupId() const { return m_contextGroupId; }
   int sessionId() const { return m_sessionId; }
 
-  Response findInjectedScript(int contextId, InjectedScript*&);
-  Response findInjectedScript(RemoteObjectIdBase*, InjectedScript*&);
+  Response findInjectedScript(
+      int contextId, InjectedScript*&,
+      std::shared_ptr<InspectedContext>* inspectedContext = nullptr);
+  Response findInjectedScript(
+      RemoteObjectIdBase*, InjectedScript*&,
+      std::shared_ptr<InspectedContext>* inspectedContext = nullptr);
   void reset();
   void discardInjectedScripts();
   void reportAllContexts(V8RuntimeAgentImpl*);
@@ -114,7 +120,7 @@ class V8InspectorSessionImpl : public V8InspectorSession,
 
  private:
   V8InspectorSessionImpl(V8InspectorImpl*, int contextGroupId, int sessionId,
-                         V8Inspector::Channel*, StringView state,
+                         V8Inspector::ManagedChannel*, StringView state,
                          V8Inspector::ClientTrustLevel,
                          std::shared_ptr<V8DebuggerBarrier>);
   protocol::DictionaryValue* agentState(const String16& name);
@@ -133,7 +139,7 @@ class V8InspectorSessionImpl : public V8InspectorSession,
   int m_contextGroupId;
   int m_sessionId;
   V8InspectorImpl* m_inspector;
-  V8Inspector::Channel* m_channel;
+  cppgc::Persistent<V8Inspector::ManagedChannel> m_channel;
   bool m_customObjectFormatterEnabled;
 
   protocol::UberDispatcher m_dispatcher;
@@ -155,6 +161,8 @@ class V8InspectorSessionImpl : public V8InspectorSession,
   // deconstruct the V8 session until we return from the
   // "dispatchProtocolMessage" call (i.e. no freed "this" remains on the stack).
   class KeepSessionAliveScope {
+    CPPGC_STACK_ALLOCATED();
+
    public:
     explicit KeepSessionAliveScope(const V8InspectorSessionImpl& session)
         : m_this(session.m_weakThis.lock()) {}

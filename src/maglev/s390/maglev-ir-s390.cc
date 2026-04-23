@@ -61,6 +61,7 @@ void Int32Increment::GenerateCode(MaglevAssembler* masm,
   Register value = ToRegister(ValueInput());
   Register out = ToRegister(result());
   __ AddS32(out, value, Operand(1));
+  __ LoadS32(out, out);
 }
 
 void Int32Decrement::SetValueLocationConstraints() {
@@ -71,7 +72,8 @@ void Int32Decrement::GenerateCode(MaglevAssembler* masm,
                                   const ProcessingState& state) {
   Register value = ToRegister(ValueInput());
   Register out = ToRegister(result());
-  __ SubS32(out, value, Operand(1));
+  __ AddS32(out, value, Operand(-1));
+  __ LoadS32(out, out);
 }
 
 void Int32IncrementWithOverflow::SetValueLocationConstraints() {
@@ -402,24 +404,11 @@ void Int32MultiplyWithOverflow::GenerateCode(MaglevAssembler* masm,
 
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register temp = temps.AcquireScratch();
-  Condition cond = overflow;
-  if (!CpuFeatures::IsSupported(MISC_INSTR_EXT2)) {
-    DCHECK(!AreAliased(r0, temp));
-    __ lgfr(r0, left);
-    __ lgfr(temp, right);
-    __ MulS64(r0, temp);
-  }
   __ Or(temp, left, right);
   __ MulS32(out, left, right);
-  if (!CpuFeatures::IsSupported(MISC_INSTR_EXT2)) {
-    // Test whether {high} is a sign-extension of {result}.
-    __ LoadS32(out, out);
-    __ CmpU64(r0, out);
-    cond = ne;
-  }
   DCHECK_REGLIST_EMPTY(RegList{temp, out} &
                        GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
-  __ EmitEagerDeoptIf(cond, DeoptimizeReason::kOverflow, this);
+  __ EmitEagerDeoptIf(overflow, DeoptimizeReason::kOverflow, this);
 
   // Making sure that the 32-bit output is zero-extended.
   __ LoadU32(out, out);
@@ -749,6 +738,14 @@ void Float64Abs::GenerateCode(MaglevAssembler* masm,
   __ lpdbr(out, in);
 }
 
+void Float64RoundToFloat32::GenerateCode(MaglevAssembler* masm,
+                                         const ProcessingState& state) {
+  DoubleRegister input = ToDoubleRegister(ValueInput());
+  DoubleRegister result = ToDoubleRegister(this->result());
+  __ ledbr(result, input);
+  __ ldebr(result, result);
+}
+
 void Float64Round::GenerateCode(MaglevAssembler* masm,
                                 const ProcessingState& state) {
   DoubleRegister in = ToDoubleRegister(ValueInput());
@@ -771,6 +768,8 @@ void Float64Round::GenerateCode(MaglevAssembler* masm,
     __ CeilF64(out, in);
   } else if (kind_ == Kind::kFloor) {
     __ FloorF64(out, in);
+  } else if (kind_ == Kind::kTrunc) {
+    __ TruncF64(out, in);
   }
 }
 
@@ -792,11 +791,20 @@ void Float64Exponentiate::GenerateCode(MaglevAssembler* masm,
 void Float64Min::SetValueLocationConstraints() {
   UseRegister(LeftInput());
   UseRegister(RightInput());
-  DefineAsRegister(this);
+  if (LeftInput().node() == RightInput().node()) {
+    DefineSameAsFirst(this);
+  } else {
+    DefineAsRegister(this);
+  }
 }
 
 void Float64Min::GenerateCode(MaglevAssembler* masm,
                               const ProcessingState& state) {
+  if (LeftInput().node() == RightInput().node()) {
+    DCHECK_EQ(ToDoubleRegister(result()), ToDoubleRegister(LeftInput()));
+    return;
+  }
+
   DoubleRegister left = ToDoubleRegister(LeftInput());
   DoubleRegister right = ToDoubleRegister(RightInput());
   DoubleRegister out = ToDoubleRegister(result());
@@ -806,11 +814,20 @@ void Float64Min::GenerateCode(MaglevAssembler* masm,
 void Float64Max::SetValueLocationConstraints() {
   UseRegister(LeftInput());
   UseRegister(RightInput());
-  DefineAsRegister(this);
+  if (LeftInput().node() == RightInput().node()) {
+    DefineSameAsFirst(this);
+  } else {
+    DefineAsRegister(this);
+  }
 }
 
 void Float64Max::GenerateCode(MaglevAssembler* masm,
                               const ProcessingState& state) {
+  if (LeftInput().node() == RightInput().node()) {
+    DCHECK_EQ(ToDoubleRegister(result()), ToDoubleRegister(LeftInput()));
+    return;
+  }
+
   DoubleRegister left = ToDoubleRegister(LeftInput());
   DoubleRegister right = ToDoubleRegister(RightInput());
   DoubleRegister out = ToDoubleRegister(result());
@@ -905,7 +922,7 @@ void CheckJSDataViewBounds::GenerateCode(MaglevAssembler* masm,
     __ SubS64(limit, byte_length, Operand(element_size - 1));
     __ EmitEagerDeoptIf(lt, DeoptimizeReason::kOutOfBounds, this);
   }
-  __ CmpS32(index, limit);
+  __ CmpU32(index, limit);
   __ EmitEagerDeoptIf(ge, DeoptimizeReason::kOutOfBounds, this);
 }
 
@@ -955,6 +972,25 @@ void UnsafeFloat64ToHoleyFloat64::SetValueLocationConstraints() {
 }
 void UnsafeFloat64ToHoleyFloat64::GenerateCode(MaglevAssembler* masm,
                                                const ProcessingState& state) {}
+
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+void HoleyFloat64ConvertHoleToUndefined::SetValueLocationConstraints() {
+  UseRegister(ValueInput());
+  DefineSameAsFirst(this);
+  set_temporaries_needed(1);
+}
+void HoleyFloat64ConvertHoleToUndefined::GenerateCode(
+    MaglevAssembler* masm, const ProcessingState& state) {
+  DoubleRegister value = ToDoubleRegister(ValueInput());
+  Label done;
+
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
+  __ JumpIfNotHoleNan(value, scratch, &done);
+  __ Move(value, UndefinedNan());
+  __ bind(&done);
+}
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
 
 namespace {
 
@@ -1024,11 +1060,13 @@ void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
                                    ReduceInterruptBudgetType type, int amount) {
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register budget = temps.AcquireScratch();
-  __ LoadU32(budget, FieldMemOperand(feedback_cell,
-                                     FeedbackCell::kInterruptBudgetOffset));
+  __ LoadU32(budget,
+             FieldMemOperand(feedback_cell,
+                             offsetof(FeedbackCell, interrupt_budget_)));
   __ SubS32(budget, Operand(amount));
-  __ StoreU32(budget, FieldMemOperand(feedback_cell,
-                                      FeedbackCell::kInterruptBudgetOffset));
+  __ StoreU32(budget,
+              FieldMemOperand(feedback_cell,
+                              offsetof(FeedbackCell, interrupt_budget_)));
   ZoneLabelRef done(masm);
   __ JumpToDeferredIf(lt, HandleInterruptsAndTiering, done, node, type, budget);
   __ bind(*done);

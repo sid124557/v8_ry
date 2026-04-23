@@ -69,8 +69,6 @@ const char* SectionName(SectionCode code) {
       return kBranchHintsString;
     case kCompilationPrioritySectionCode:
       return kCompilationPriorityString;
-    case kDescriptorsSectionCode:
-      return kDescriptorsString;
     default:
       return "<unknown>";
   }
@@ -146,8 +144,8 @@ ModuleResult DecodeWasmModule(WasmEnabledFeatures enabled_features,
                               base::Vector<const uint8_t> wire_bytes,
                               bool validate_functions, ModuleOrigin origin,
                               WasmDetectedFeatures* detected_features) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.DecodeWasmModule");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.DecodeWasmModule");
   ModuleDecoderImpl decoder{enabled_features, wire_bytes, origin,
                             detected_features};
   ModuleResult result = decoder.DecodeModule(validate_functions);
@@ -214,38 +212,16 @@ size_t ModuleDecoder::IdentifyUnknownSection(ModuleDecoder* decoder,
 
 bool ModuleDecoder::ok() const { return impl_->ok(); }
 
-Result<const FunctionSig*> DecodeWasmSignatureForTesting(
-    WasmEnabledFeatures enabled_features, Zone* zone,
-    base::Vector<const uint8_t> bytes) {
+Result<std::pair<WasmModuleSignatureStorage, const FunctionSig*>>
+DecodeWasmSignatureForTesting(WasmEnabledFeatures enabled_features,
+                              base::Vector<const uint8_t> bytes) {
   WasmDetectedFeatures unused_detected_features;
   ModuleDecoderImpl decoder{enabled_features, bytes, kWasmOrigin,
                             &unused_detected_features};
-  return decoder.toResult(
-      decoder.DecodeFunctionSignatureForTesting(zone, bytes.begin()));
-}
-
-ConstantExpression DecodeWasmInitExprForTesting(
-    WasmEnabledFeatures enabled_features, base::Vector<const uint8_t> bytes,
-    ValueType expected) {
-  WasmDetectedFeatures unused_detected_features;
-  ModuleDecoderImpl decoder{enabled_features, bytes, kWasmOrigin,
-                            &unused_detected_features};
-  return decoder.DecodeInitExprForTesting(expected);
-}
-
-FunctionResult DecodeWasmFunctionForTesting(
-    WasmEnabledFeatures enabled_features, Zone* zone,
-    ModuleWireBytes wire_bytes, const WasmModule* module,
-    base::Vector<const uint8_t> function_bytes) {
-  if (function_bytes.size() > kV8MaxWasmFunctionSize) {
-    return FunctionResult{
-        WasmError{0, "size > maximum function size (%zu): %zu",
-                  kV8MaxWasmFunctionSize, function_bytes.size()}};
-  }
-  WasmDetectedFeatures unused_detected_features;
-  ModuleDecoderImpl decoder{enabled_features, function_bytes, kWasmOrigin,
-                            &unused_detected_features};
-  return decoder.DecodeSingleFunctionForTesting(zone, wire_bytes, module);
+  const FunctionSig* sig =
+      decoder.DecodeFunctionSignatureForTesting(bytes.begin());
+  return decoder.toResult(std::make_pair(
+      std::move(decoder.shared_module()->signature_storage), sig));
 }
 
 AsmJsOffsetsResult DecodeAsmJsOffsets(
@@ -553,11 +529,11 @@ class ValidateFunctionsTask : public JobTask {
   }
 
   void Run(JobDelegate* delegate) override {
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-                 "wasm.ValidateFunctionsTask");
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.ValidateFunctionsTask");
 
     WasmDetectedFeatures detected_features;
-    Zone zone(GetWasmEngine()->allocator(), ZONE_NAME);
+    Zone zone(GetWasmEngine()->allocator(), "Wasm ValidateFunctionsTask");
     do {
       // Get the index of the next function to validate.
       // {fetch_add} might overrun {after_last_function_} by a bit. Since the
@@ -595,7 +571,7 @@ class ValidateFunctionsTask : public JobTask {
                         WasmDetectedFeatures* detected_features) {
     const WasmFunction& function = module_->functions[func_index];
     DCHECK_LT(0, function.code.offset());
-    bool is_shared = module_->type(function.sig_index).is_shared;
+    SharedFlag is_shared = module_->type(function.sig_index).is_shared;
     FunctionBody body{function.sig, function.code.offset(),
                       wire_bytes_.begin() + function.code.offset(),
                       wire_bytes_.begin() + function.code.end_offset(),
@@ -647,9 +623,9 @@ WasmError ValidateFunctions(const WasmModule* module,
                             base::Vector<const uint8_t> wire_bytes,
                             std::function<bool(int)> filter,
                             WasmDetectedFeatures* detected_features_out) {
-  TRACE_EVENT2(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.ValidateFunctions", "num_declared_functions",
-               module->num_declared_functions, "has_filter", filter != nullptr);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.ValidateFunctions", "num_declared_functions",
+              module->num_declared_functions, "has_filter", filter != nullptr);
   DCHECK_EQ(kWasmOrigin, module->origin);
 
   class NeverYieldDelegate final : public JobDelegate {

@@ -11,6 +11,7 @@
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/js-objects-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/utils/memcopy.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -19,13 +20,6 @@ namespace v8 {
 namespace internal {
 
 #include "torque-generated/src/objects/js-array-buffer-tq-inl.inc"
-
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSArrayBuffer)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSArrayBufferView)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSTypedArray)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSDataViewOrRabGsabDataView)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSDataView)
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSRabGsabDataView)
 
 ACCESSORS(JSTypedArray, base_pointer, Tagged<Object>, kBasePointerOffset)
 RELEASE_ACQUIRE_ACCESSORS(JSTypedArray, base_pointer, Tagged<Object>,
@@ -159,12 +153,61 @@ ArrayBufferExtension** JSArrayBuffer::extension_location() const {
 void JSArrayBuffer::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) != 0) {
     DCHECK_EQ(4, FIELD_SIZE(kOptionalPaddingOffset));
-    memset(reinterpret_cast<void*>(address() + kOptionalPaddingOffset), 0,
+    Memset(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset), 0,
            FIELD_SIZE(kOptionalPaddingOffset));
   }
 }
 
-ACCESSORS(JSArrayBuffer, detach_key, Tagged<Object>, kDetachKeyOffset)
+ACCESSORS_CHECKED2(JSArrayBuffer, views_or_detach_key, Tagged<MaybeObject>,
+                   kViewsOrDetachKeyOffset, true, true)
+
+Tagged<MaybeObject> JSArrayBuffer::views() const {
+  if (has_detach_key()) return kManyViews;
+  Tagged<MaybeObject> res = views_or_detach_key();
+  DCHECK(res.IsSmi() || res.IsWeak() || res.IsCleared());
+  return res;
+}
+
+void JSArrayBuffer::set_views(Tagged<MaybeObject> value,
+                              WriteBarrierMode mode) {
+  DCHECK(!has_detach_key());
+  DCHECK(value.IsWeak() || value == kNoView || value == kManyViews);
+  set_views_or_detach_key(value, mode);
+}
+
+Tagged<Cell> JSArrayBuffer::detach_key() const {
+  DCHECK(has_detach_key());
+  return Cast<Cell>(views_or_detach_key().GetHeapObjectAssumeStrong());
+}
+
+void JSArrayBuffer::set_detach_key(Tagged<Cell> value, WriteBarrierMode mode) {
+  set_views_or_detach_key(value, mode);
+}
+
+bool JSArrayBuffer::has_detach_key() const {
+  Tagged<MaybeObject> value = views_or_detach_key();
+  return value.IsStrong() && IsCell(value.GetHeapObjectAssumeStrong());
+}
+
+Tagged<Object> JSArrayBuffer::DetachKey(Isolate* isolate) {
+  if (!has_detach_key()) {
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
+  return detach_key()->value();
+}
+
+inline void JSArrayBuffer::AttachView(Tagged<JSArrayBufferView> new_view) {
+  if (!v8_flags.track_array_buffer_views) return;
+  if (is_shared() || has_detach_key()) return;
+  Tagged<MaybeObject> current_views = views();
+  if (current_views == kManyViews) return;
+  if (current_views.IsCleared() || current_views == kNoView) {
+    set_views(MakeWeak(new_view));
+    return;
+  }
+  DCHECK(IsJSArrayBufferView(current_views.GetHeapObjectAssumeWeak()));
+  set_views(kManyViews);
+}
 
 void JSArrayBuffer::set_bit_field(uint32_t bits) {
   RELAXED_WRITE_UINT32_FIELD(*this, kBitFieldOffset, bits);
@@ -187,6 +230,17 @@ BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_resizable_by_js,
                     JSArrayBuffer::IsResizableByJsBit)
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_immutable,
                     JSArrayBuffer::IsImmutableBit)
+
+bool JSArrayBuffer::was_detached(AcquireLoadTag) const {
+  uint32_t bits = ACQUIRE_READ_UINT32_FIELD(*this, kBitFieldOffset);
+  return WasDetachedBit::decode(bits);
+}
+
+void JSArrayBuffer::set_was_detached(bool value, ReleaseStoreTag) {
+  uint32_t bits = bit_field();
+  bits = WasDetachedBit::update(bits, value);
+  RELEASE_WRITE_UINT32_FIELD(*this, kBitFieldOffset, bits);
+}
 
 bool JSArrayBuffer::IsEmpty() const {
   auto backing_store = GetBackingStore();

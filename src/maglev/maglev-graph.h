@@ -11,6 +11,7 @@
 #include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-graph-labeller.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/maglev/maglev-tracer.h"
 #include "src/zone/zone-containers.h"
 
 namespace v8 {
@@ -30,6 +31,18 @@ class MaglevCallSiteInfoCompare {
 using MaglevCallSiteCandidates =
     ZonePriorityQueue<MaglevCallSiteInfo*, MaglevCallSiteInfoCompare>;
 
+struct MaglevCallerDetails;
+struct InliningTreeDebugInfo : public ZoneObject {
+  compiler::SharedFunctionInfoRef shared;
+  MaglevCallerDetails* details;
+  int budget = 0;
+  int order = 0;
+  ZoneVector<InliningTreeDebugInfo*> children;
+  InliningTreeDebugInfo(Zone* zone, compiler::SharedFunctionInfoRef shared,
+                        MaglevCallerDetails* details)
+      : shared(shared), details(details), children(zone) {}
+};
+
 class Graph final : public ZoneObject {
  public:
   static Graph* New(MaglevCompilationInfo* info) {
@@ -46,7 +59,6 @@ class Graph final : public ZoneObject {
         tagged_index_constants_(zone()),
         int32_constants_(zone()),
         uint32_constants_(zone()),
-        shifted_int53_constants_(zone()),
         intptr_constants_(zone()),
         float64_constants_(zone()),
         holey_float64_constants_(zone()),
@@ -61,7 +73,7 @@ class Graph final : public ZoneObject {
         constants_(zone()),
         trusted_constants_(zone()),
         inlined_functions_(zone()),
-        scope_infos_(zone()) {}
+        inlining_tree_debug_info_(nullptr) {}
 
   BasicBlock* operator[](int i) { return blocks_[i]; }
   const BasicBlock* operator[](int i) const { return blocks_[i]; }
@@ -135,6 +147,9 @@ class Graph final : public ZoneObject {
     total_peeled_bytecode_size_ += size;
   }
 
+  int total_nodes() const { return total_nodes_; }
+  void increment_total_nodes() { total_nodes_++; }
+
   compiler::ZoneRefMap<compiler::HeapObjectRef, Constant*>& constants() {
     return constants_;
   }
@@ -144,9 +159,6 @@ class Graph final : public ZoneObject {
     return tagged_index_constants_;
   }
   ZoneMap<int32_t, Int32Constant*>& int32() { return int32_constants_; }
-  ZoneMap<ShiftedInt53, ShiftedInt53Constant*>& shifted_int53() {
-    return shifted_int53_constants_;
-  }
   ZoneMap<uint32_t, Uint32Constant*>& uint32() { return uint32_constants_; }
   ZoneMap<intptr_t, IntPtrConstant*>& intptr() { return intptr_constants_; }
   ZoneMap<uint64_t, Float64Constant*>& float64() { return float64_constants_; }
@@ -160,7 +172,7 @@ class Graph final : public ZoneObject {
   }
 
   ZoneVector<InitialValue*>& osr_values() { return osr_values_; }
-  ZoneVector<InitialValue*>& parameters() { return parameters_; }
+  ZoneVector<ValueNode*>& parameters() { return parameters_; }
 
   MaglevCallSiteCandidates& inlineable_calls() { return inlineable_calls_; }
 
@@ -204,6 +216,12 @@ class Graph final : public ZoneObject {
   inlined_functions() {
     return inlined_functions_;
   }
+  InliningTreeDebugInfo* inlining_tree_debug_info() const {
+    return inlining_tree_debug_info_;
+  }
+  void set_inlining_tree_debug_info(InliningTreeDebugInfo* tree) {
+    inlining_tree_debug_info_ = tree;
+  }
   bool has_recursive_calls() const { return has_recursive_calls_; }
   void set_has_recursive_calls(bool value) { has_recursive_calls_ = value; }
 
@@ -236,15 +254,8 @@ class Graph final : public ZoneObject {
 
   // Resolve the scope info of a context value.
   // An empty result means we don't statically know the context's scope.
-  compiler::OptionalScopeInfoRef TryGetScopeInfo(ValueNode* context,
-                                                 bool for_suspend = false);
   bool ContextMayAlias(ValueNode* context,
                        compiler::OptionalScopeInfoRef scope_info);
-
-  void record_scope_info(ValueNode* context,
-                         compiler::OptionalScopeInfoRef scope_info) {
-    scope_infos_[context] = scope_info;
-  }
 
   SmiConstant* GetSmiConstant(int constant) {
     DCHECK(Smi::IsValid(constant));
@@ -258,10 +269,6 @@ class Graph final : public ZoneObject {
 
   Int32Constant* GetInt32Constant(int32_t constant) {
     return GetOrAddNewConstantNode(int32_constants_, constant);
-  }
-
-  ShiftedInt53Constant* GetShiftedInt53Constant(ShiftedInt53 constant) {
-    return GetOrAddNewConstantNode(shifted_int53_constants_, constant);
   }
 
   IntPtrConstant* GetIntPtrConstant(intptr_t constant) {
@@ -333,13 +340,12 @@ class Graph final : public ZoneObject {
   ZoneMap<int, TaggedIndexConstant*> tagged_index_constants_;
   ZoneMap<int32_t, Int32Constant*> int32_constants_;
   ZoneMap<uint32_t, Uint32Constant*> uint32_constants_;
-  ZoneMap<ShiftedInt53, ShiftedInt53Constant*> shifted_int53_constants_;
   ZoneMap<intptr_t, IntPtrConstant*> intptr_constants_;
   // Use the bits of the float as the key.
   ZoneMap<uint64_t, Float64Constant*> float64_constants_;
   ZoneMap<uint64_t, HoleyFloat64Constant*> holey_float64_constants_;
   ZoneMap<uint64_t, Constant*> heap_number_constants_;
-  ZoneVector<InitialValue*> parameters_;
+  ZoneVector<ValueNode*> parameters_;
   ZoneAbslFlatHashSet<DeoptFrame*> eager_deopt_top_frames_;
   ZoneAbslFlatHashMap<DeoptFrame*, std::pair<interpreter::Register, int>>
       lazy_deopt_top_frames_;
@@ -352,16 +358,17 @@ class Graph final : public ZoneObject {
       trusted_constants_;
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>
       inlined_functions_;
+  InliningTreeDebugInfo* inlining_tree_debug_info_;
 
   bool has_recursive_calls_ = false;
   int total_inlined_bytecode_size_ = 0;
   int total_inlined_bytecode_size_small_ = 0;
   int total_peeled_bytecode_size_ = 0;
+  int total_nodes_ = 0;
   uint32_t object_ids_ = 0;
   bool has_resumable_generator_ = false;
   bool may_have_unreachable_blocks_ = false;
   bool may_have_truncation_ = false;
-  ZoneUnorderedMap<ValueNode*, compiler::OptionalScopeInfoRef> scope_infos_;
   BasicBlock::Id max_block_id_ = 0;
   std::unique_ptr<MaglevGraphLabeller> graph_labeller_ = {};
 
@@ -369,15 +376,14 @@ class Graph final : public ZoneObject {
   NodeT* CreateNewConstantNode(Args&&... args) const {
     static_assert(IsConstantNode(Node::opcode_of<NodeT>));
     NodeT* node = NodeBase::New<NodeT>(zone(), std::forward<Args>(args)...);
-    static_assert(!NodeT::kProperties.can_eager_deopt());
+    static_assert(!NodeT::kProperties.has_eager_deopt_info());
     static_assert(!NodeT::kProperties.can_lazy_deopt());
     static_assert(!NodeT::kProperties.can_throw());
     static_assert(!NodeT::kProperties.can_write());
     if (has_graph_labeller()) graph_labeller()->RegisterNode(node);
     if (V8_UNLIKELY(v8_flags.trace_maglev_graph_building &&
                     is_tracing_enabled())) {
-      std::cout << "  " << node << "  " << PrintNodeLabel(node) << ": "
-                << PrintNode(node) << std::endl;
+      TraceLogger(Tracer(compilation_info())) << TraceNewNode{node};
     }
     return node;
   }
@@ -392,9 +398,6 @@ class Graph final : public ZoneObject {
     }
     return it->second;
   }
-
-  compiler::OptionalScopeInfoRef TryGetScopeInfoForContextLoad(
-      ValueNode* context, int offset);
 
   template <typename Function>
   void IterateGraphAndSweepDeadBlocks(Function&& is_dead);

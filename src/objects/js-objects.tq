@@ -40,6 +40,7 @@ macro NewJSObject(implicit context: Context)(): JSObject {
   return AllocateJSObjectFromMap(map);
 }
 
+@cppObjectLayoutDefinition
 extern class JSExternalObject extends JSObject {
   value: ExternalPointer;
 }
@@ -75,7 +76,7 @@ macro GetDerivedMap(
     newTarget: JSReceiver): Map {
   try {
     const constructor =
-        Cast<JSFunctionWithPrototypeSlot>(newTarget) otherwise SlowPath;
+        Cast<JSFunctionWithPrototype>(newTarget) otherwise SlowPath;
     dcheck(IsConstructor(constructor));
     if (Is<TheHole>(constructor.prototype_or_initial_map)) goto SlowPath;
     const map =
@@ -142,10 +143,12 @@ extern class JSGlobalObject extends JSSpecialObject {
   global_proxy_for_api: JSGlobalProxy;
 }
 
+@cppObjectLayoutDefinition
 extern class JSPrimitiveWrapper extends JSCustomElementsObject {
   value: JSAny;
 }
 
+@cppObjectLayoutDefinition
 extern class JSMessageObject extends JSObject {
   // Tagged fields.
   message_type: Smi;
@@ -165,6 +168,7 @@ extern class JSMessageObject extends JSObject {
   error_level: Smi;
 }
 
+@cppObjectLayoutDefinition
 extern class JSDate extends JSObject {
   // If one component is NaN, all of them are, indicating a NaN time value.
 
@@ -185,6 +189,7 @@ extern class JSDate extends JSObject {
   cache_stamp: Smi|NaN;
 }
 
+@cppObjectLayoutDefinition
 extern class JSAsyncFromSyncIterator extends JSObject {
   sync_iterator: JSReceiver;
   // The "next" method is loaded during GetIterator, and is not reloaded for
@@ -192,6 +197,7 @@ extern class JSAsyncFromSyncIterator extends JSObject {
   next: Object;
 }
 
+@cppObjectLayoutDefinition
 extern class JSStringIterator extends JSObject {
   // The [[IteratedString]] slot.
   string: String;
@@ -201,6 +207,7 @@ extern class JSStringIterator extends JSObject {
 
 // The wrapper returned by Iterator.from().
 // https://tc39.es/ecma262/#sec-wrapforvaliditeratorprototype-object
+@cppObjectLayoutDefinition
 extern class JSValidIteratorWrapper extends JSObject {
   // The [[Iterated]] slot.
   underlying: iterator::IteratorRecord;

@@ -23,7 +23,7 @@ class StructBodyDescriptor;
 
 #include "torque-generated/src/objects/call-site-info-tq.inc"
 
-V8_OBJECT class CallSiteInfo : public StructLayout {
+V8_OBJECT class CallSiteInfo : public Struct {
  public:
   DEFINE_TORQUE_GENERATED_CALL_SITE_INFO_FLAGS()
 
@@ -51,8 +51,9 @@ V8_OBJECT class CallSiteInfo : public StructLayout {
   bool IsNative() const;
 
   inline Tagged<HeapObject> code_object(IsolateForSandbox isolate) const;
-  inline void set_code_object(Tagged<HeapObject> code,
-                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline void set_code_object(
+      Tagged<Union<Code, BytecodeArray, Undefined>> code,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   inline Tagged<JSAny> receiver_or_instance() const;
   inline void set_receiver_or_instance(
@@ -69,16 +70,30 @@ V8_OBJECT class CallSiteInfo : public StructLayout {
   inline int flags() const;
   inline void set_flags(int value);
 
-  inline Tagged<FixedArray> parameters() const;
-  inline void set_parameters(Tagged<FixedArray> value,
-                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-
   // Dispatched behavior.
   DECL_VERIFIER(CallSiteInfo)
   DECL_PRINTER(CallSiteInfo)
 
   // Used to signal that the requested field is unknown.
   static constexpr int kUnknown = kNoSourcePosition;
+
+  // For delayed CallSiteInfo creation (storing the raw data for several
+  // CallSiteInfos in a FixedArray).
+  enum Fields { kCode = 0, kReceiver, kFunction, kOffset, kFlags, kCount };
+
+  // Deferred flags: defined in the Torque bitfield, but only meaningful in
+  // raw capture arrays.  Stripped before creating actual CallSiteInfo objects.
+  static constexpr int kDeferredFlagsMask = kIsDeferredBaselineFrame;
+
+  static DirectHandle<CallSiteInfo> ConstructFromRawData(
+      Isolate* isolate, DirectHandle<FixedArray> frames, int index);
+
+  // Expand a raw stack-capture array that may contain deferred entries
+  // (optimized/baseline frames that were not Summarize'd at capture time)
+  // into a fully-resolved raw array where every entry corresponds to one
+  // logical JS frame.  Non-deferred entries are copied as-is.
+  static Handle<FixedArray> ExpandDeferredFrames(Isolate* isolate,
+                                                 Handle<FixedArray> raw_data);
 
   V8_EXPORT_PRIVATE static int GetLineNumber(DirectHandle<CallSiteInfo> info);
   V8_EXPORT_PRIVATE static int GetColumnNumber(DirectHandle<CallSiteInfo> info);
@@ -135,13 +150,17 @@ V8_OBJECT class CallSiteInfo : public StructLayout {
   friend class TorqueGeneratedCallSiteInfoAsserts;
   friend struct ObjectTraits<CallSiteInfo>;
 
-  TrustedPointerMember<Union<Code, BytecodeArray>, kUnknownIndirectPointerTag>
+  static constexpr IndirectPointerTagRange kCodeObjectTagRange =
+      IndirectPointerTagRange(kBytecodeArrayIndirectPointerTag,
+                              kCodeIndirectPointerTag);
+  static_assert(kCodeObjectTagRange.Size() == 2);
+
+  TrustedPointerMember<Union<Code, BytecodeArray>, kCodeObjectTagRange>
       code_object_;
   TaggedMember<JSAny> receiver_or_instance_;
   TaggedMember<Union<JSFunction, Smi>> function_;
   TaggedMember<Smi> code_offset_or_source_position_;
   TaggedMember<Smi> flags_;
-  TaggedMember<FixedArray> parameters_;
 } V8_OBJECT_END;
 
 template <>
@@ -150,7 +169,7 @@ struct ObjectTraits<CallSiteInfo> {
       FixedBodyDescriptor<offsetof(CallSiteInfo, receiver_or_instance_),
                           sizeof(CallSiteInfo), sizeof(CallSiteInfo)>,
       WithStrongTrustedPointer<offsetof(CallSiteInfo, code_object_),
-                               kUnknownIndirectPointerTag>>;
+                               CallSiteInfo::kCodeObjectTagRange>>;
 };
 
 class IncrementalStringBuilder;

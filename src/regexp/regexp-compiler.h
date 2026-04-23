@@ -15,11 +15,15 @@
 namespace v8 {
 namespace internal {
 
-class DynamicBitSet;
 class Isolate;
+
+namespace regexp {
+
+class Diagnostics;
+class DynamicBitSet;
 class SpecialLoopState;
 
-namespace regexp_compiler_constants {
+namespace compiler_constants {
 
 // The '2' variant is has inclusive from and exclusive to.
 // This covers \s as defined in ECMA-262 5.1, 15.10.2.12,
@@ -49,9 +53,9 @@ constexpr uint32_t kMaxLookaheadForBoyerMoore = 8;
 // at a time, which is not always enough to pay for the extra logic.
 constexpr uint32_t kPatternTooShortForBoyerMoore = 2;
 
-}  // namespace regexp_compiler_constants
+}  // namespace compiler_constants
 
-inline bool NeedsUnicodeCaseEquivalents(RegExpFlags flags) {
+inline bool NeedsUnicodeCaseEquivalents(Flags flags) {
   // Both unicode (or unicode sets) and ignore_case flags are set. We need to
   // use ICU to find the closure over case equivalents.
   return IsEitherUnicode(flags) && IsIgnoreCase(flags);
@@ -190,15 +194,16 @@ class BoyerMoorePositionInfo : public ZoneObject {
 
 class BoyerMooreLookahead : public ZoneObject {
  public:
-  BoyerMooreLookahead(int length, RegExpCompiler* compiler, Zone* zone);
+  BoyerMooreLookahead(int length, Compiler* compiler, Zone* zone);
 
-  int length() { return length_; }
+  int length() const { return length_; }
   int max_char() { return max_char_; }
-  RegExpCompiler* compiler() { return compiler_; }
+  Compiler* compiler() { return compiler_; }
 
   int Count(int map_number) { return bitmaps_->at(map_number)->map_count(); }
 
   BoyerMoorePositionInfo* at(int i) { return bitmaps_->at(i); }
+  const BoyerMoorePositionInfo* at(int i) const { return bitmaps_->at(i); }
 
   void Set(int map_number, int character) {
     if (character > max_char_) return;
@@ -229,7 +234,7 @@ class BoyerMooreLookahead : public ZoneObject {
   // Therefore it is OK to read a character this far ahead of the current match
   // point.
   int length_;
-  RegExpCompiler* compiler_;
+  Compiler* compiler_;
   // 0xff for Latin1, 0xffff for UTF-16.
   int max_char_;
   ZoneList<BoyerMoorePositionInfo*>* bitmaps_;
@@ -256,7 +261,7 @@ class BoyerMooreLookahead : public ZoneObject {
 // where baz has been matched.
 class Trace {
  public:
-  // A value for a property that is either known to be true, know to be false,
+  // A value for a property that is either known to be true, known to be false,
   // or not known.
   enum TriBool { UNKNOWN = -1, FALSE_VALUE = 0, TRUE_VALUE = 1 };
 
@@ -296,7 +301,7 @@ class Trace {
     // ignored and need not be written.
     kFlushSuccess
   };
-  EmitResult Flush(RegExpCompiler* compiler, RegExpNode* successor,
+  EmitResult Flush(Compiler* compiler, Node* successor,
                    FlushMode mode = kFlushFull);
 
   // Some callers add/subtract 1 from cp_offset, assuming that the result is
@@ -363,7 +368,7 @@ class Trace {
     quick_check_performed_ = *d;
   }
   void InvalidateCurrentCharacter();
-  EmitResult AdvanceCurrentPositionInTrace(int by, RegExpCompiler* compiler);
+  EmitResult AdvanceCurrentPositionInTrace(int by, Compiler* compiler);
   const Trace* next() const { return next_; }
 
   class ConstIterator final {
@@ -448,7 +453,7 @@ class SpecialLoopState {
 };
 
 struct PreloadState {
-  static const int kEatsAtLeastNotYetInitialized = -1;
+  static constexpr int kEatsAtLeastNotYetInitialized = -1;
   bool preload_is_current_;
   bool preload_has_checked_bounds_;
   int preload_characters_;
@@ -459,8 +464,8 @@ struct PreloadState {
 // Analysis performs assertion propagation and computes eats_at_least_ values.
 // See the comments on AssertionPropagator and EatsAtLeastPropagator for more
 // details.
-RegExpError AnalyzeRegExp(Isolate* isolate, bool is_one_byte, RegExpFlags flags,
-                          RegExpNode* node);
+Error AnalyzeRegExp(Isolate* isolate, bool is_one_byte, Flags flags,
+                    Node* node);
 
 class FrequencyCollator {
  public:
@@ -507,10 +512,10 @@ class FrequencyCollator {
   int total_samples_;
 };
 
-class RegExpCompiler {
+class Compiler {
  public:
-  RegExpCompiler(Isolate* isolate, Zone* zone, int capture_count,
-                 RegExpFlags flags, bool is_one_byte);
+  Compiler(Isolate* isolate, Zone* zone, int capture_count, Flags flags,
+           bool is_one_byte);
 
   int AllocateRegister() {
     if (next_register_ >= RegExpMacroAssembler::kMaxRegister) {
@@ -537,24 +542,24 @@ class RegExpCompiler {
   }
 
   struct CompilationResult final {
-    explicit CompilationResult(RegExpError err) : error(err) {}
+    explicit CompilationResult(Error err) : error(err) {}
     CompilationResult(DirectHandle<Object> code, int registers)
         : code(code), num_registers(registers) {}
 
     static CompilationResult RegExpTooBig() {
-      return CompilationResult(RegExpError::kTooLarge);
+      return CompilationResult(Error::kTooLarge);
     }
 
-    bool Succeeded() const { return error == RegExpError::kNone; }
+    bool Succeeded() const { return error == Error::kNone; }
 
-    const RegExpError error = RegExpError::kNone;
+    const Error error = Error::kNone;
     DirectHandle<Object> code;
     int num_registers = 0;
   };
 
   CompilationResult Assemble(Isolate* isolate, RegExpMacroAssembler* assembler,
-                             RegExpNode* start, int capture_count,
-                             DirectHandle<String> pattern);
+                             Node* start, int capture_count,
+                             DirectHandle<RegExpData> re_data);
 
   // Preprocessing is the final step of node creation before analysis
   // and assembly. It includes:
@@ -562,13 +567,13 @@ class RegExpCompiler {
   // - Inserting the implicit .* before/after the regexp if necessary.
   // - If the input is a one-byte string, filtering out nodes that can't match.
   // - Fixing up regexp matches that start within a surrogate pair.
-  RegExpNode* PreprocessRegExp(RegExpCompileData* data, bool is_one_byte);
+  Node* PreprocessRegExp(CompileData* data, bool is_one_byte);
 
   // If the regexp matching starts within a surrogate pair, step back to the
   // lead surrogate and start matching from there.
-  RegExpNode* OptionallyStepBackToLeadSurrogate(RegExpNode* on_success);
+  Node* OptionallyStepBackToLeadSurrogate(Node* on_success);
 
-  inline void AddWork(RegExpNode* node) {
+  inline void AddWork(Node* node) {
     if (!node->on_work_list() && !node->label()->is_bound()) {
       node->set_on_work_list(true);
       work_list_->push_back(node);
@@ -594,8 +599,8 @@ class RegExpCompiler {
   inline void IncrementRecursionDepth() { recursion_depth_++; }
   inline void DecrementRecursionDepth() { recursion_depth_--; }
 
-  inline RegExpFlags flags() const { return flags_; }
-  inline void set_flags(RegExpFlags flags) { flags_ = flags; }
+  inline Flags flags() const { return flags_; }
+  inline void set_flags(Flags flags) { flags_ = flags; }
 
   void SetRegExpTooBig() { reg_exp_too_big_ = true; }
   bool IsRegExpTooBig() const { return reg_exp_too_big_; }
@@ -628,6 +633,10 @@ class RegExpCompiler {
   }
   void ToNodeCheckForStackOverflow();
 
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+  Diagnostics* diagnostics() { return diagnostics_.get(); }
+  void set_diagnostics(std::unique_ptr<Diagnostics> diagnostics);
+#endif
   Isolate* isolate() const { return isolate_; }
   Zone* zone() const { return zone_; }
 
@@ -638,9 +647,9 @@ class RegExpCompiler {
   int next_register_;
   int unicode_lookaround_stack_register_;
   int unicode_lookaround_position_register_;
-  ZoneVector<RegExpNode*>* work_list_;
+  ZoneVector<Node*>* work_list_;
   int recursion_depth_;
-  RegExpFlags flags_;
+  Flags flags_;
   RegExpMacroAssembler* macro_assembler_;
   bool one_byte_;
   bool reg_exp_too_big_;
@@ -650,6 +659,9 @@ class RegExpCompiler {
   bool read_backward_;
   int current_expansion_factor_;
   FrequencyCollator frequency_collator_;
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+  std::unique_ptr<Diagnostics> diagnostics_;
+#endif
   Isolate* isolate_;
   Zone* zone_;
 };
@@ -684,6 +696,7 @@ class UnicodeRangeSplitter {
 // TODO(jgruber): Move to CharacterRange.
 bool RangeContainsLatin1Equivalents(CharacterRange range);
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
 

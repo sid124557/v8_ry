@@ -28,6 +28,7 @@
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter-intrinsics.h"
 #include "src/maglev/maglev-basic-block.h"
+#include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/maglev/maglev-graph-labeller.h"
 #include "src/maglev/maglev-graph-printer.h"
@@ -35,6 +36,7 @@
 #include "src/maglev/maglev-interpreter-frame-state.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-reducer.h"
+#include "src/maglev/maglev-tracer.h"
 #include "src/objects/bytecode-array.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/string.h"
@@ -44,6 +46,9 @@ namespace internal {
 namespace maglev {
 
 class CallArguments;
+
+template <typename ReducerT>
+class MapInference;
 
 struct CatchBlockDetails {
   BasicBlockRef* ref = nullptr;
@@ -60,9 +65,12 @@ struct MaglevCallerDetails {
   ZoneUnorderedMap<KnownNodeAspects::LoadedContextSlotsKey, Node*>
       unobserved_context_slot_stores;
   CatchBlockDetails catch_block;
-  bool is_inside_loop;
+  int loop_depth;
+  int peeled_iteration_count;
   bool is_eager_inline;
+  bool is_small_function;
   float call_frequency;
+  InliningTreeDebugInfo* parent_inlining_tree_debug_info;
 };
 
 struct MaglevCallSiteInfo {
@@ -75,7 +83,14 @@ struct MaglevCallSiteInfo {
 
 class MaglevGraphBuilder {
  public:
+  template <typename T>
+  friend class MapInference;
+
+  using MapInference = maglev::MapInference<MaglevGraphBuilder>;
+  using CallArguments = ::v8::internal::maglev::CallArguments;
+
   class EagerDeoptFrameScope;
+
   class LazyDeoptFrameScope;
 
   class V8_NODISCARD LazyDeoptResultLocationScope {
@@ -160,6 +175,19 @@ class MaglevGraphBuilder {
 
   Graph* graph() const { return graph_; }
   Zone* zone() const { return compilation_unit_->zone(); }
+
+  compiler::ScopeInfoRef GetScopeInfo(interpreter::Register reg) const {
+    auto opt_scope_info = register_scope_infos_[reg];
+    DCHECK(opt_scope_info.has_value());
+    return opt_scope_info.value();
+  }
+
+  compiler::ScopeInfoRef GetCurrentScopeInfo() const {
+    return GetScopeInfo(interpreter::Register::current_context());
+  }
+
+  void SetCurrentScopeInfo(compiler::OptionalScopeInfoRef scope_info);
+
   MaglevCompilationUnit* compilation_unit() const { return compilation_unit_; }
   const InterpreterFrameState& current_interpreter_frame() const {
     return current_interpreter_frame_;
@@ -183,14 +211,6 @@ class MaglevGraphBuilder {
   // function.
   bool is_inline() const { return caller_details_ != nullptr; }
   int inlining_depth() const { return compilation_unit_->inlining_depth(); }
-
-  bool is_eager_inline() const {
-    DCHECK(is_inline());
-    DCHECK_IMPLIES(!caller_details_->is_eager_inline,
-                   v8_flags.maglev_non_eager_inlining ||
-                       v8_flags.turbolev_non_eager_inlining);
-    return caller_details_->is_eager_inline;
-  }
 
   DeoptFrame* GetLatestCheckpointedFrame();
   DeoptFrame* GetDeoptFrameForEagerDeopt() {
@@ -217,86 +237,13 @@ class MaglevGraphBuilder {
 
   bool should_abort_compilation() const { return should_abort_compilation_; }
 
-  bool is_non_eager_inlining_enabled() const {
-    if (is_turbolev()) {
-      return v8_flags.turbolev_non_eager_inlining;
-    }
-    return v8_flags.maglev_non_eager_inlining;
+  bool is_tracing() const {
+    return v8_flags.trace_maglev_graph_building &&
+           compilation_unit_->info()->is_tracing_enabled();
   }
 
-  // Inlining configuration. For Maglev, we use the Maglev flags, and for
-  // Turbolev, we use the Turbofan flags.
-  int max_inlined_bytecode_size() {
-    if (is_turbolev()) {
-      return v8_flags.max_inlined_bytecode_size;
-    } else {
-      return v8_flags.max_maglev_inlined_bytecode_size;
-    }
-  }
-  int max_inlined_bytecode_size_small() {
-    if (is_turbolev()) {
-      return v8_flags.max_inlined_bytecode_size_small;
-    } else {
-      return v8_flags.max_maglev_inlined_bytecode_size_small;
-    }
-  }
-  int max_inlined_bytecode_size_small_with_heapnum_in_out() {
-    if (is_turbolev()) {
-      return v8_flags.max_inlined_bytecode_size_small_with_heapnum_in_out;
-    } else {
-      return v8_flags
-          .max_maglev_inlined_bytecode_size_small_with_heapnum_in_out;
-    }
-  }
-  float min_inlining_frequency() {
-    if (is_turbolev()) {
-      return v8_flags.min_inlining_frequency;
-    } else {
-      return v8_flags.min_maglev_inlining_frequency;
-    }
-  }
-  int max_inlined_bytecode_size_cumulative() {
-    if (is_turbolev()) {
-      return v8_flags.max_turbolev_inlined_bytecode_size_cumulative;
-    } else {
-      return v8_flags.max_maglev_inlined_bytecode_size_cumulative;
-    }
-  }
-  int max_inlined_bytecode_size_small_total() {
-    if (is_turbolev()) {
-      return v8_flags.max_inlined_bytecode_size_small_total;
-    } else {
-      return v8_flags.max_maglev_inlined_bytecode_size_small_total;
-    }
-  }
-  int max_inline_depth() {
-    if (is_turbolev()) {
-      // This is just to avoid some corner cases, especially since we allow
-      // recursive inlining.
-      constexpr int kMaxDepthForInlining = 50;
-      return kMaxDepthForInlining;
-    } else {
-      return v8_flags.max_maglev_inline_depth;
-    }
-  }
-  // We allow small functions to be inlined deeper than regular functions.
-  int max_inline_depth_small() {
-    if (is_turbolev()) {
-      // For Turbolev, small and normal functions can all be inlined at the same
-      // depth.
-      return max_inline_depth();
-    } else {
-      return v8_flags.max_maglev_hard_inline_depth;
-    }
-  }
-
-  bool is_inline_api_calls_enabled() const {
-    // TODO(victorgomes): Inline API calls are still not supported by Turbolev.
-    return !is_turbolev() && v8_flags.maglev_inline_api_calls;
-  }
-
-  bool is_tracing_enabled() const {
-    return compilation_unit_->info()->is_tracing_enabled();
+  maglev::Tracer tracer() const {
+    return maglev::Tracer(compilation_unit_->info());
   }
 
   KnownNodeAspects& known_node_aspects() {
@@ -329,6 +276,8 @@ class MaglevGraphBuilder {
 #endif
 
  private:
+  void InitializeScopeInfo();
+
   class DeoptFrameScopeBase;
 
   // Helper class for building a subgraph with its own control flow, that is not
@@ -405,8 +354,10 @@ class MaglevGraphBuilder {
     return known_node_aspects().EnsureType<Function>(broker(), node, type,
                                                      ensure_new_type);
   }
-  NodeType GetType(ValueNode* node) {
-    return known_node_aspects().GetType(broker(), node);
+  NodeType GetType(ValueNode* node,
+                   AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
+                       AllowWideningSmiToInt32::kAllow) {
+    return reducer_.GetType(node, allow_widening_smi_to_int32);
   }
   NodeInfo* GetOrCreateInfoFor(ValueNode* node) {
     return known_node_aspects().GetOrCreateInfoFor(broker(), node);
@@ -415,14 +366,13 @@ class MaglevGraphBuilder {
   // Returns true if we statically know that {lhs} and {rhs} have disjoint
   // types.
   bool HaveDisjointTypes(ValueNode* lhs, ValueNode* rhs) {
-    return known_node_aspects().HaveDisjointTypes(broker(), lhs, rhs);
+    return reducer_.HaveDisjointTypes(lhs, rhs);
   }
   bool HasDisjointType(ValueNode* lhs, NodeType rhs_type) {
-    return known_node_aspects().HasDisjointType(broker(), lhs, rhs_type);
+    return reducer_.HasDisjointType(lhs, rhs_type);
   }
 
-  void SetKnownValue(ValueNode* node, compiler::ObjectRef constant,
-                     NodeType new_node_type);
+ public:
   bool ShouldEmitInterruptBudgetChecks();
   bool ShouldEmitOsrInterruptBudgetChecks();
 
@@ -448,7 +398,8 @@ class MaglevGraphBuilder {
     return merge_states_[offset] != nullptr;
   }
 
-  ValueNode* GetContextAtDepth(ValueNode* context, size_t depth);
+  ValueNode* GetContextAtDepth(ValueNode* context, size_t depth,
+                               compiler::ScopeInfoRef* out_scope_info);
   bool CheckContextExtensions(size_t depth);
 
   void KillPeeledLoopTargets(int peelings);
@@ -457,9 +408,9 @@ class MaglevGraphBuilder {
 
   void UpdateSourceAndBytecodePosition(int offset);
 
-  void PrintVirtualObjects();
-
   ReduceResult VisitSingleBytecode();
+
+  void HandleTryBlock(int offset);
 
 #define BYTECODE_VISITOR(name, ...) ReduceResult Visit##name();
   BYTECODE_LIST(BYTECODE_VISITOR, BYTECODE_VISITOR)
@@ -500,28 +451,35 @@ class MaglevGraphBuilder {
 
   bool ContextMayAlias(ValueNode* context,
                        compiler::OptionalScopeInfoRef scope_info);
-  bool TrySpecializeLoadContextSlotToFunctionContext(
-      ValueNode* context, int slot_index,
-      ContextSlotMutability slot_mutability);
-  ValueNode* TrySpecializeLoadContextSlot(ValueNode* context, int index);
-  ValueNode* LoadAndCacheContextSlot(ValueNode* context, int offset,
-                                     ContextSlotMutability slot_mutability,
-                                     ContextMode context_mode);
-  MaybeReduceResult TrySpecializeStoreContextSlot(ValueNode* context, int index,
-                                                  ValueNode* value);
+
+  MaybeReduceResult TrySpecializeLoadContextSlotToFunctionContext(
+      ValueNode* context, int index, VariableMode mode,
+      MaybeAssignedFlag assigned);
+  ValueNode* TrySpecializeLoadContextCell(ValueNode* context, int index,
+                                          MaybeAssignedFlag assigned);
+  ReduceResult LoadAndCacheContextSlot(ValueNode* context, int index,
+                                       ContextMode context_mode,
+                                       compiler::ScopeInfoRef scope_info);
+  MaybeReduceResult TrySpecializeStoreContextCell(ValueNode* context, int index,
+                                                  ValueNode* value,
+                                                  MaybeAssignedFlag assigned);
   ReduceResult StoreAndCacheContextSlot(ValueNode* context, int index,
                                         ValueNode* value,
-                                        ContextMode context_mode);
+                                        ContextMode context_mode,
+                                        compiler::ScopeInfoRef scope_info);
   ValueNode* TryGetParentContext(ValueNode* node);
-  void MinimizeContextChainDepth(ValueNode** context, size_t* depth);
+  void MinimizeContextChainDepth(ValueNode** context, size_t* depth,
+                                 compiler::ScopeInfoRef* scope_info);
   void EscapeContext();
-  void BuildLoadContextSlot(ValueNode* context, size_t depth, int slot_index,
-                            ContextSlotMutability slot_mutability,
-                            ContextMode context_mode);
+  MaybeAssignedFlag GetContextMaybeAssigned(compiler::ScopeInfoRef scope_info,
+                                            int index, VariableMode* mode);
+  ReduceResult BuildLoadContextSlot(ValueNode* context, size_t depth,
+                                    int slot_index, ContextMode context_mode,
+                                    compiler::ScopeInfoRef scope_info);
   ReduceResult BuildStoreContextSlot(ValueNode* context, size_t depth,
                                      int slot_index, ValueNode* value,
-                                     ContextMode context_mode);
-
+                                     ContextMode context_mode,
+                                     compiler::ScopeInfoRef scope_info);
   ReduceResult BuildStoreMap(ValueNode* object, compiler::MapRef map,
                              StoreMap::Kind kind);
 
@@ -632,6 +590,19 @@ class MaglevGraphBuilder {
     DCHECK_NOT_NULL(current_interpreter_frame_.get(src));
 
     current_interpreter_frame_.set(dst, current_interpreter_frame_.get(src));
+
+    compiler::OptionalScopeInfoRef src_scope_info;
+    if (src == interpreter::Register::virtual_accumulator()) {
+      src_scope_info = accumulator_scope_info_;
+    } else {
+      src_scope_info = register_scope_infos_[src];
+    }
+
+    if (dst == interpreter::Register::virtual_accumulator()) {
+      accumulator_scope_info_ = src_scope_info;
+    } else {
+      register_scope_infos_[dst] = src_scope_info;
+    }
   }
 
   ReduceResult GetTaggedValue(ValueNode* value,
@@ -691,8 +662,8 @@ class MaglevGraphBuilder {
     return reducer_.TryGetConstant<T>(node, constant_node);
   }
 
-  enum CheckType GetCheckType(NodeType type) {
-    return reducer_.GetCheckType(type);
+  enum CheckType GetCheckType(NodeType type, ValueNode* target) {
+    return reducer_.GetCheckType(type, target);
   }
 
   std::optional<int32_t> TryGetInt32Constant(ValueNode* value);
@@ -780,6 +751,12 @@ class MaglevGraphBuilder {
                                               NodeType allowed_input_type) {
     return GetFloat64ForToNumber(iterator_.GetRegisterOperand(operand_index),
                                  allowed_input_type);
+  }
+
+  void RecordSmiUse(ValueNode* object) {
+    if (Phi* as_phi = object->TryCast<Phi>()) {
+      as_phi->SetUseRequiresSmi();
+    }
   }
 
   template <typename NodeT>
@@ -929,6 +906,7 @@ class MaglevGraphBuilder {
   V(ArrayPrototypeValues)                      \
   V(ArrayPrototypePush)                        \
   V(ArrayPrototypePop)                         \
+  V(BooleanConstructor)                        \
   V(DataViewPrototypeGetByteLength)            \
   V(DataViewPrototypeGetInt8)                  \
   V(DataViewPrototypeSetInt8)                  \
@@ -952,7 +930,10 @@ class MaglevGraphBuilder {
   V(MapPrototypeGet)                           \
   V(ObjectPrototypeGetProto)                   \
   V(ObjectGetPrototypeOf)                      \
+  V(ReflectGet)                                \
   V(ReflectGetPrototypeOf)                     \
+  V(ReflectHas)                                \
+  V(ReflectApply)                              \
   V(ObjectPrototypeHasOwnProperty)             \
   V(NumberParseInt)                            \
   V(MathCeil)                                  \
@@ -963,6 +944,9 @@ class MaglevGraphBuilder {
   V(MathClz32)                                 \
   V(MathMin)                                   \
   V(MathMax)                                   \
+  V(MathImul)                                  \
+  V(MathFround)                                \
+  V(MathTrunc)                                 \
   V(SetPrototypeHas)                           \
   V(StringConstructor)                         \
   V(StringFromCharCode)                        \
@@ -970,7 +954,10 @@ class MaglevGraphBuilder {
   V(StringPrototypeCharCodeAt)                 \
   V(StringPrototypeCodePointAt)                \
   V(StringPrototypeSlice)                      \
+  V(StringPrototypeSubstring)                  \
   V(StringPrototypeStartsWith)                 \
+  V(StringPrototypeIndexOf)                    \
+  V(StringPrototypeIncludes)                   \
   V(StringPrototypeIterator)                   \
   IF_INTL(V, StringPrototypeLocaleCompareIntl) \
   CONTINUATION_PRESERVED_EMBEDDER_DATA_LIST(V) \
@@ -1013,6 +1000,9 @@ class MaglevGraphBuilder {
                                               ValueNode* index,
                                               StringAtOOBMode oob_mode);
 
+  MaybeReduceResult TryReduceStringPrototypeIndexOfIncludes(CallArguments& args,
+                                                            bool is_includes);
+
   MaybeReduceResult TryReduceGetProto(ValueNode* node);
 
   template <typename MapKindsT, typename IndexToElementsKindFunc,
@@ -1039,6 +1029,11 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryReduceGetIterator(ValueNode* receiver, int load_slot,
                                          int call_slot);
 
+  MaybeReduceResult TryReduceForOfNext(
+      ValueNode* iterator, ValueNode* next_method,
+      std::pair<interpreter::Register, interpreter::Register> result_pair,
+      int call_slot);
+
   MaybeReduceResult BuildCallSelf(ValueNode* context, ValueNode* function,
                                   ValueNode* new_target,
                                   compiler::SharedFunctionInfoRef shared,
@@ -1048,6 +1043,10 @@ class MaglevGraphBuilder {
       CallArguments& args, const compiler::FeedbackSource& feedback_source);
   MaybeReduceResult TryReduceAsyncFunctionEnter(ValueNode* closure,
                                                 ValueNode* reducer);
+  MaybeReduceResult TryReduceAsyncFunctionReject(
+      ValueNode* async_function_object, ValueNode* reason);
+  MaybeReduceResult TryReduceAsyncFunctionResolve(
+      ValueNode* async_function_object, ValueNode* value);
   bool TargetIsCurrentCompilingUnit(compiler::JSFunctionRef target);
   bool IsTheHoleConstant(ValueNode* node);
   ReduceResult BuildCallKnownJSFunction(
@@ -1070,8 +1069,8 @@ class MaglevGraphBuilder {
       const compiler::FeedbackSource& feedback_source);
   bool CanInlineCall(compiler::SharedFunctionInfoRef shared,
                      float call_frequency);
-  bool IsFunctionSmall(compiler::SharedFunctionInfoRef shared,
-                       CallArguments& args);
+  bool IsFunctionCandidateForEagerInlining(
+      compiler::SharedFunctionInfoRef shared, CallArguments& args);
   bool ShouldEagerInlineCall(compiler::SharedFunctionInfoRef shared,
                              CallArguments& args);
   ReduceResult BuildEagerInlineCall(ValueNode* context, ValueNode* function,
@@ -1103,7 +1102,9 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryBuildCallKnownApiFunction(
       compiler::JSFunctionRef function, compiler::SharedFunctionInfoRef shared,
       CallArguments& args);
-  compiler::HolderLookupResult TryInferApiHolderValue(
+  // Returns either a result or nullopt. The latter case must be treated like
+  // IsDoneWithAbort.
+  std::optional<compiler::HolderLookupResult> TryInferApiHolderValue(
       compiler::FunctionTemplateInfoRef function_template_info,
       ValueNode* receiver);
   MaybeReduceResult TryReduceCallForApiFunction(
@@ -1190,8 +1191,6 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryBuildGlobalStore(
       const compiler::GlobalAccessFeedback& global_access_feedback);
 
-  MaybeReduceResult TryBuildScriptContextConstantLoad(
-      const compiler::GlobalAccessFeedback& global_access_feedback);
   MaybeReduceResult TryBuildScriptContextLoad(
       const compiler::GlobalAccessFeedback& global_access_feedback);
   MaybeReduceResult TryBuildPropertyCellLoad(
@@ -1206,7 +1205,10 @@ class MaglevGraphBuilder {
   ReduceResult BuildSmiUntag(ValueNode* node);
   ReduceResult BuildGetCharCodeAt(ValueNode* string, ValueNode* index);
 
-  ReduceResult BuildCheckSmi(ValueNode* object, bool elidable = true);
+  ReduceResult BuildCheckSmi(
+      ValueNode* object, bool elidable = true,
+      AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
+          AllowWideningSmiToInt32::kDontAllow);
   ReduceResult BuildCheckNumber(ValueNode* object);
   ReduceResult BuildCheckHeapObject(ValueNode* object);
   ReduceResult BuildCheckJSFunction(ValueNode* object);
@@ -1221,7 +1223,11 @@ class MaglevGraphBuilder {
       ValueNode* object, base::Vector<const compiler::MapRef> maps,
       std::optional<ValueNode*> map = {},
       bool has_deprecated_map_without_migration_target = false,
-      bool migration_done_outside = false);
+      bool migration_done_outside = false) {
+    return reducer_.BuildCheckMaps(object, maps, map,
+                                   has_deprecated_map_without_migration_target,
+                                   migration_done_outside);
+  }
   ReduceResult BuildTransitionElementsKindOrCheckMap(
       ValueNode* heap_object, ValueNode* object_map,
       const ZoneVector<compiler::MapRef>& transition_sources,
@@ -1254,15 +1260,23 @@ class MaglevGraphBuilder {
   ReduceResult BuildConvertHoleToUndefined(ValueNode* node);
   ReduceResult BuildCheckNotHole(ValueNode* node);
 
-  template <bool flip = false>
-  ReduceResult BuildToBoolean(ValueNode* node);
   ReduceResult BuildLogicalNot(ValueNode* value);
   ReduceResult BuildTestUndetectable(ValueNode* value);
   ReduceResult BuildToNumberOrToNumeric(Object::Conversion mode);
 
   enum class TrackObjectMode { kLoad, kStore };
   bool CanTrackObjectChanges(ValueNode* object, TrackObjectMode mode);
-  bool CanElideWriteBarrier(ValueNode* object, ValueNode* value);
+
+  // When CanElideWriteBarrier returns true because the input is a known Smi, if
+  // this input happens to be a Smi, we usually need to call SetUseRequiresSmi
+  // to ensure that this Phi remains a Smi even after phi untagging. However,
+  // when CanElideWriteBarrier is called from a DCHECK, we don't want this
+  // side-effect to happen because if it was supposed to happen, it should have
+  // happened elsewhere. So, when calling CanElideWriteBarrier in DCHECKs, we
+  // should pass `RecordSmiUseIfNeeded::kNo` for {record_smi_use}.
+  enum class RecordSmiUseIfNeeded { kYes, kNo };
+  bool CanElideWriteBarrier(ValueNode* object, ValueNode* value,
+                            RecordSmiUseIfNeeded record_smi_use);
 
   ReduceResult BuildLoadMap(ValueNode* object);
 
@@ -1271,11 +1285,12 @@ class MaglevGraphBuilder {
 
   void BuildInitializeStore(vobj::Field desc, InlinedAllocation* alloc,
                             AllocationType allocation_type, ValueNode* value,
-                            StoreTaggedMode store_mode);
+                            StoreTaggedMode store_mode,
+                            MaybeAssignedFlag maybe_assigned = kMaybeAssigned);
   void BuildInitializeStore_Tagged(vobj::Field desc, InlinedAllocation* alloc,
                                    AllocationType allocation_type,
-                                   ValueNode* value,
-                                   StoreTaggedMode store_mode);
+                                   ValueNode* value, StoreTaggedMode store_mode,
+                                   MaybeAssignedFlag maybe_assigned);
   void BuildInitializeStore_TrustedPointer(vobj::Field desc,
                                            InlinedAllocation* alloc,
                                            AllocationType allocation_type,
@@ -1291,7 +1306,8 @@ class MaglevGraphBuilder {
   ReduceResult BuildStoreTaggedField(
       ValueNode* object, ValueNode* value, int offset,
       StoreTaggedMode store_mode,
-      PropertyKey property_key = PropertyKey::None());
+      PropertyKey property_key = PropertyKey::None(),
+      MaybeAssignedFlag maybe_assigned = kMaybeAssigned);
   ReduceResult BuildStoreTaggedFieldNoWriteBarrier(
       ValueNode* object, ValueNode* value, int offset,
       StoreTaggedMode store_mode,
@@ -1405,6 +1421,13 @@ class MaglevGraphBuilder {
       compiler::FeedbackSource const& feedback_source,
       compiler::AccessMode access_mode,
       GenericAccessFunc&& build_generic_access);
+  template <typename GenericAccessFunc>
+  MaybeReduceResult TryBuildHomomorphicNamedAccess(
+      ValueNode* receiver, ValueNode* lookup_start_object,
+      compiler::HomomorphicPropertyAccessFeedback const& feedback,
+      compiler::FeedbackSource const& feedback_source,
+      compiler::AccessMode access_mode,
+      GenericAccessFunc&& build_generic_access);
 
   template <typename GenericAccessFunc>
   MaybeReduceResult TryBuildLoadNamedProperty(
@@ -1503,30 +1526,7 @@ class MaglevGraphBuilder {
   // array with elements kind |kind|.
   ReduceResult ConvertForStoring(ValueNode* node, ElementsKind kind);
 
-  enum InferHasInPrototypeChainResult {
-    kMayBeInPrototypeChain,
-    kIsInPrototypeChain,
-    kIsNotInPrototypeChain
-  };
-  InferHasInPrototypeChainResult InferHasInPrototypeChain(
-      ValueNode* receiver, compiler::HeapObjectRef prototype);
-  MaybeReduceResult TryBuildFastHasInPrototypeChain(
-      ValueNode* object, compiler::HeapObjectRef prototype);
-  ReduceResult BuildHasInPrototypeChain(ValueNode* object,
-                                        compiler::HeapObjectRef prototype);
-  MaybeReduceResult TryBuildFastOrdinaryHasInstance(
-      ValueNode* object, compiler::JSObjectRef callable,
-      ValueNode* callable_node);
-  ReduceResult BuildOrdinaryHasInstance(ValueNode* object,
-                                        compiler::JSObjectRef callable,
-                                        ValueNode* callable_node);
-  MaybeReduceResult TryBuildFastInstanceOf(ValueNode* object,
-                                           compiler::JSObjectRef callable_ref,
-                                           ValueNode* callable_node);
-  MaybeReduceResult TryBuildFastInstanceOfWithFeedback(
-      ValueNode* object, ValueNode* callable,
-      compiler::FeedbackSource feedback_source);
-
+  bool IsEscaping(InlinedAllocation* allocation);
   VirtualObject* GetObjectFromAllocation(InlinedAllocation* allocation);
   VirtualObject* GetModifiableObjectFromAllocation(
       InlinedAllocation* allocation);
@@ -1580,10 +1580,15 @@ class MaglevGraphBuilder {
   void ClearCurrentAllocationBlock();
 
   void AddDeoptUse(ValueNode* node);
+  void AddMaterializedDeoptUse(ValueNode* node);
   void AddDeoptUse(VirtualObject* alloc);
   void AddNonEscapingUses(InlinedAllocation* allocation, int use_count);
 
-  void AddDeoptUseToScopeData(DeoptFrame::FrameData& data);
+  void AddDeoptUseToScopeData(const DeoptFrame::FrameData& data);
+
+  DeoptFrame* RecursivelyWrapDeoptFrameWithContinuations(
+      const DeoptFrame& frame,
+      const MaglevGraphBuilder::LazyDeoptFrameScope* parent_scope);
 
   std::optional<VirtualObject*> TryGetNonEscapingArgumentsObject(
       ValueNode* value);
@@ -1602,7 +1607,7 @@ class MaglevGraphBuilder {
   template <CreateArgumentsType type>
   VirtualObject* BuildVirtualArgumentsObject();
   template <CreateArgumentsType type>
-  ValueNode* BuildAndAllocateArgumentsObject();
+  ReduceResult BuildAndAllocateArgumentsObject();
 
   bool CanAllocateSloppyArgumentElements();
   bool CanAllocateInlinedArgumentElements();
@@ -1645,6 +1650,8 @@ class MaglevGraphBuilder {
   ReduceResult BuildFloat64BinarySmiOperationNodeForToNumber(
       NodeType allowed_input_type);
 
+  ReduceResult BuildFloat64SpeculateSafeAdd(ValueNode* left, ValueNode* right);
+
   template <Operation kOperation>
   ReduceResult VisitUnaryOperation();
   template <Operation kOperation>
@@ -1677,7 +1684,7 @@ class MaglevGraphBuilder {
   void BeginLoopEffects(int loop_header);
   void EndLoopEffects(int loop_header);
   void MergeIntoFrameState(BasicBlock* block, int target);
-  void MergeDeadIntoFrameState(int target);
+  void MergeDeadIntoFrameState(int target, bool is_fallthrough = false);
   void MergeDeadLoopIntoFrameState(int target);
   void MergeIntoInlinedReturnFrameStateForReturn(BasicBlock* block);
   void MergeIntoInlinedReturnFrameStateForSuspendGenerator(BasicBlock* block);
@@ -1881,6 +1888,7 @@ class MaglevGraphBuilder {
 
   void MarkBranchDeadAndJumpIfNeeded(bool is_jump_taken);
 
+  void OsrPrewalk();
   void CalculatePredecessorCounts();
 
   compiler::FeedbackVectorRef feedback() const {
@@ -1916,7 +1924,9 @@ class MaglevGraphBuilder {
   }
   int argument_count_without_receiver() const { return argument_count() - 1; }
 
+  bool IsInsideLoopInTheCurrentFunction() const;
   bool IsInsideLoop() const;
+  int GetLoopDepth() const;
 
   // The fake offset used as a target for all exits of an inlined function.
   int inline_exit_offset() const {
@@ -1929,11 +1939,16 @@ class MaglevGraphBuilder {
   LocalIsolate* const local_isolate_;
   MaglevCompilationUnit* const compilation_unit_;
   MaglevCallerDetails* caller_details_;
+  InliningTreeDebugInfo* current_inlining_tree_debug_info_ = nullptr;
 
   // Cache the heap broker since we access it a bunch.
   compiler::JSHeapBroker* broker_ = compilation_unit_->broker();
 
+  // Cache flags.
+  const CompilationFlags flags_;
+
   Graph* const graph_;
+  Tracer tracer_;
   compiler::BytecodeAnalysis bytecode_analysis_;
   interpreter::BytecodeArrayIterator iterator_;
   SourcePositionTableIterator source_position_iterator_;
@@ -2015,6 +2030,8 @@ class MaglevGraphBuilder {
   // decremented predecessor counts inside of the loop before processing the
   // body again. For this, we record offsets where we decremented the
   // predecessor count.
+  void PrewalkBytecode();
+
   ZoneVector<int> decremented_predecessor_offsets_;
   // The set of loop headers for which we decided to do loop peeling.
   BitVector loop_headers_to_peel_;
@@ -2041,6 +2058,9 @@ class MaglevGraphBuilder {
   BasicBlockRef* jump_targets_;
   MergePointInterpreterFrameState** merge_states_;
 
+  RegisterFrameArray<compiler::OptionalScopeInfoRef> register_scope_infos_;
+  compiler::OptionalScopeInfoRef accumulator_scope_info_;
+
   InterpreterFrameState current_interpreter_frame_;
   SpeculationMode current_speculation_mode_ =
       SpeculationMode::kDisallowSpeculation;
@@ -2058,13 +2078,11 @@ class MaglevGraphBuilder {
   }
 
   int inlining_id_ = SourcePosition::kNotInlined;
-  int next_handler_table_index_ = 0;
+  uint32_t next_handler_table_index_ = 0;
 
   EagerDeoptFrameScope* current_eager_deopt_scope_ = nullptr;
   LazyDeoptFrameScope* current_lazy_deopt_scope_ = nullptr;
   LazyDeoptResultLocationScope* lazy_deopt_result_location_scope_ = nullptr;
-
-  compiler::OptionalScopeInfoRef last_suspend_scope_info_ = {};
 
   struct HandlerTableEntry {
     int end;
@@ -2096,6 +2114,10 @@ class MaglevGraphBuilder {
 
   ZoneUnorderedMap<KnownNodeAspects::LoadedContextSlotsKey, Node*>
       unobserved_context_slot_stores_;
+
+  ZoneMap<int, compiler::OptionalScopeInfoRef> dead_scope_infos_;
+
+  bool is_resumable_function_ = false;
 
   // When set, inline only small functions.
   bool only_inline_small_ = false;
@@ -2138,6 +2160,11 @@ void MaglevGraphBuilder::MarkPossibleSideEffect(NodeT* node) {
   if (is_loop_effect_tracking()) {
     if constexpr (IsElementsArrayWrite(Node::opcode_of<NodeT>)) {
       loop_effects_->keys_cleared.insert(PropertyKey::Elements());
+    } else if constexpr (std::is_same_v<NodeT, StoreMap>) {
+      // Only transitioning Map stores can invalidate unstable maps.
+      if (node->template Cast<StoreMap>()->is_transitioning()) {
+        loop_effects_->unstable_aspects_cleared = true;
+      }
     } else if constexpr (!IsSimpleFieldStore(Node::opcode_of<NodeT>) &&
                          !IsTypedArrayStore(Node::opcode_of<NodeT>)) {
       loop_effects_->unstable_aspects_cleared = true;

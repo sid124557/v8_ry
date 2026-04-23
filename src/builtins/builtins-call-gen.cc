@@ -82,6 +82,18 @@ void Builtins::Generate_CallApiCallbackOptimized(MacroAssembler* masm) {
   Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kOptimized);
 }
 
+void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+  Generate_CallApiAccessorImpl(masm, false, false);
+}
+
+void Builtins::Generate_CallNamedInterceptorGetter(MacroAssembler* masm) {
+  Generate_CallApiAccessorImpl(masm, true, false);
+}
+
+void Builtins::Generate_CallNamedInterceptorSetter(MacroAssembler* masm) {
+  Generate_CallApiAccessorImpl(masm, true, true);
+}
+
 // TODO(cbruni): Try reusing code between builtin versions to avoid binary
 // overhead.
 TF_BUILTIN(Call_ReceiverIsNullOrUndefined_Baseline_Compact,
@@ -300,8 +312,8 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithArrayLike(
     TNode<Int32T> length = var_length.value();
     {
       Label normalize_done(this);
-      CSA_DCHECK(this, Int32LessThanOrEqual(
-                           length, Int32Constant(FixedArray::kMaxLength)));
+      CSA_DCHECK(this, Uint32LessThanOrEqual(
+                           length, Uint32Constant(FixedArray::kMaxLength)));
       GotoIfNot(Word32Equal(length, Int32Constant(0)), &normalize_done);
       // Make sure we don't accidentally pass along the
       // empty_fixed_double_array since the tailed-called stubs cannot handle
@@ -346,8 +358,8 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructDoubleVarargs(
     TNode<Int32T> args_count, TNode<Context> context, TNode<Int32T> kind) {
   const ElementsKind new_kind = PACKED_ELEMENTS;
   const WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER;
-  CSA_DCHECK(this, Int32LessThanOrEqual(length,
-                                        Int32Constant(FixedArray::kMaxLength)));
+  CSA_DCHECK(this, Uint32LessThanOrEqual(
+                       length, Uint32Constant(FixedArray::kMaxLength)));
   TNode<IntPtrT> intptr_length = ChangeInt32ToIntPtr(length);
   CSA_DCHECK(this, WordNotEqual(intptr_length, IntPtrConstant(0)));
 
@@ -392,10 +404,10 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithSpread(
   // Check that the Array.prototype hasn't been modified in a way that would
   // affect iteration.
   TNode<PropertyCell> protector_cell = ArrayIteratorProtectorConstant();
-  GotoIf(
-      TaggedEqual(LoadObjectField(protector_cell, PropertyCell::kValueOffset),
-                  SmiConstant(Protectors::kProtectorInvalid)),
-      &if_generic);
+  GotoIf(TaggedEqual(
+             LoadObjectField(protector_cell, offsetof(PropertyCell, value_)),
+             SmiConstant(Protectors::kProtectorInvalid)),
+         &if_generic);
   {
     // The fast-path accesses the {spread} elements directly.
     TNode<Int32T> spread_kind = LoadMapElementsKind(spread_map);
@@ -457,8 +469,8 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithSpread(
     TNode<Int32T> length = LoadAndUntagToWord32ObjectField(
         var_js_array.value(), JSArray::kLengthOffset);
     TNode<FixedArrayBase> elements = var_elements.value();
-    CSA_DCHECK(this, Int32LessThanOrEqual(
-                         length, Int32Constant(FixedArray::kMaxLength)));
+    CSA_DCHECK(this, Uint32LessThanOrEqual(
+                         length, Uint32Constant(FixedArray::kMaxLength)));
 
     if (!new_target) {
       TailCallBuiltin(Builtin::kCallVarargs, context, target, args_count,
@@ -630,7 +642,7 @@ TNode<JSReceiver> CallOrConstructBuiltinsAssembler::GetCompatibleReceiver(
       var_template = CAST(constructor);
       TNode<Uint16T> template_type = LoadInstanceType(var_template.value());
       GotoIf(IsJSFunctionInstanceType(template_type), &template_from_closure);
-      Branch(InstanceTypeEqual(template_type, MAP_TYPE), &template_map_loop,
+      Branch(IsMapInstanceType(template_type), &template_map_loop,
              &template_loop);
     }
 
@@ -663,10 +675,10 @@ TNode<JSReceiver> CallOrConstructBuiltinsAssembler::GetCompatibleReceiver(
       GotoIfNot(IsFunctionTemplateInfoMap(LoadMap(current)), &holder_next);
 
       TNode<HeapObject> current_rare = LoadObjectField<HeapObject>(
-          current, FunctionTemplateInfo::kRareDataOffset);
+          current, offsetof(FunctionTemplateInfo, rare_data_));
       GotoIf(IsUndefined(current_rare), &holder_next);
       var_template = LoadObjectField<HeapObject>(
-          current_rare, FunctionTemplateRareData::kParentTemplateOffset);
+          current_rare, offsetof(FunctionTemplateRareData, parent_template_));
       Goto(&template_loop);
     }
 
@@ -725,7 +737,7 @@ void CallOrConstructBuiltinsAssembler::CallFunctionTemplate(
                   LoadMapBitField(receiver_map)),
               &receiver_done);
     TNode<Uint32T> function_template_info_flags = LoadObjectField<Uint32T>(
-        function_template_info, FunctionTemplateInfo::kFlagOffset);
+        function_template_info, offsetof(FunctionTemplateInfo, flag_));
     Branch(IsSetWord32<FunctionTemplateInfo::AcceptAnyReceiverBit>(
                function_template_info_flags),
            &receiver_done, &receiver_needs_access_check);
@@ -756,7 +768,7 @@ void CallOrConstructBuiltinsAssembler::CallFunctionTemplate(
       // The {function_template_info} has a signature, so look for a compatible
       // holder in the receiver's hidden prototype chain.
       TNode<HeapObject> signature = LoadObjectField<HeapObject>(
-          function_template_info, FunctionTemplateInfo::kSignatureOffset);
+          function_template_info, offsetof(FunctionTemplateInfo, signature_));
       CSA_DCHECK(this, Word32BinaryNot(IsUndefined(signature)));
       // TODO(ishell, http://crbug.com/326505377): rename to
       // CheckCompatibleReceiverOrThrow().
@@ -769,7 +781,7 @@ void CallOrConstructBuiltinsAssembler::CallFunctionTemplate(
       // we need to look for a compatible holder in the receiver's hidden
       // prototype chain.
       TNode<HeapObject> signature = LoadObjectField<HeapObject>(
-          function_template_info, FunctionTemplateInfo::kSignatureOffset);
+          function_template_info, offsetof(FunctionTemplateInfo, signature_));
       holder = Select<JSReceiver>(
           IsUndefined(signature),  // --
           [&]() { return receiver; },
@@ -781,7 +793,7 @@ void CallOrConstructBuiltinsAssembler::CallFunctionTemplate(
   }
 
   TNode<Object> callback_data = LoadObjectField(
-      function_template_info, FunctionTemplateInfo::kCallbackDataOffset);
+      function_template_info, offsetof(FunctionTemplateInfo, callback_data_));
   // If the function doesn't have an associated C++ code to execute, just
   // return the receiver as would an empty function do (see
   // HandleApiCallHelper).

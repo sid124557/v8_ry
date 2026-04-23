@@ -99,6 +99,7 @@ class OrderedHashTable : public FixedArray {
 
   InternalIndex FindEntry(Isolate* isolate, Tagged<Object> key);
 
+  // TODO(375937549): Convert return values to uint32_t.
   int NumberOfElements() const {
     return Smi::ToInt(get(NumberOfElementsIndex()));
   }
@@ -202,7 +203,8 @@ class OrderedHashTable : public FixedArray {
   // optimize that case.
   static const int kClearedTableSentinel = -1;
   static constexpr int MaxCapacity() {
-    return (FixedArray::kMaxLength - HashTableStartIndex()) /
+    // TODO(375937549): Convert to uint32_t.
+    return (static_cast<int>(FixedArray::kMaxLength) - HashTableStartIndex()) /
            (1 + (kEntrySize * kLoadFactor));
   }
 
@@ -388,7 +390,7 @@ class V8_EXPORT_PRIVATE OrderedHashMap
 //
 // Note: For the sake of brevity, the following start with index 0
 // but, they actually start from kPrefixSize * kTaggedSize to
-// account for the the prefix.
+// account for the prefix.
 //
 // [ Header ]  :
 //    [0] : Number of elements

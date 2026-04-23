@@ -16,6 +16,7 @@
 #include "src/maglev/maglev-interpreter-frame-state.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-known-node-aspects.h"
+#include "src/maglev/maglev-node-type.h"
 
 namespace v8 {
 namespace internal {
@@ -85,6 +86,24 @@ class RecomputeKnownNodeAspectsProcessor {
       known_node_aspects_ = next_block->state()->CloneKnownNodeAspects(zone());
     }
     DCHECK_NOT_NULL(known_node_aspects_);
+
+    if (block->has_state() && !block->is_exception_handler_block()) {
+      // We might now have more accurate types for phi inputs; recompute the phi
+      // types based on them.
+      for (Phi* phi : *block->state()->phis()) {
+        DCHECK_GE(phi->input_count(), 1);
+        NodeType new_type = NodeType::kNone;
+        for (int i = 0; i < phi->input_count(); ++i) {
+          ValueNode* input = phi->input_node(i)->UnwrapIdentities();
+          NodeType input_type =
+              known_node_aspects_->GetTypeUnchecked(broker(), input);
+          new_type = UnionType(new_type, input_type);
+        }
+        known_node_aspects_->GetOrCreateInfoFor(broker(), phi)
+            ->IntersectType(new_type);
+      }
+    }
+
     return BlockProcessResult::kContinue;
   }
   void PostProcessBasicBlock(BasicBlock* block) {}
@@ -183,9 +202,6 @@ class RecomputeKnownNodeAspectsProcessor {
   bool EnsureType(ValueNode* node, NodeType type) {
     return known_node_aspects().EnsureType(broker(), node, type);
   }
-  NodeType GetType(ValueNode* node) {
-    return known_node_aspects().GetType(broker(), node);
-  }
 
   BlockProcessResult AbortBlock(BasicBlock* block) {
     ControlNode* control = block->reset_control_node();
@@ -219,13 +235,27 @@ class RecomputeKnownNodeAspectsProcessor {
     return ProcessResult::kContinue;                    \
   }
   PROCESS_CHECK(Smi)
-  PROCESS_CHECK(Number)
   PROCESS_CHECK(String)
   PROCESS_CHECK(SeqOneByteString)
   PROCESS_CHECK(StringOrStringWrapper)
   PROCESS_CHECK(StringOrOddball)
   PROCESS_CHECK(Symbol)
 #undef PROCESS_CHECK
+
+  ProcessResult ProcessNode(CheckNumber* node) {
+    switch (node->mode()) {
+      case Object::Conversion::kToNumber:
+        EnsureType(node->input_node(0), NodeType::kNumber);
+        break;
+      case Object::Conversion::kToNumeric:
+        // Smi, HeapNumber or BigInt. There's no separate type for BigInt, but
+        // it's a kOtherHeapObject.
+        EnsureType(node->input_node(0),
+                   UnionType(NodeType::kNumber, NodeType::kOtherHeapObject));
+        break;
+    }
+    return ProcessResult::kContinue;
+  }
 
 #define PROCESS_SAFE_CONV(Node, Alt, Type)                                     \
   ProcessResult ProcessNode(Node* node) {                                      \
@@ -303,11 +333,12 @@ class RecomputeKnownNodeAspectsProcessor {
     return ProcessResult::kContinue;
   }
 
-  void ProcessStoreContextSlot(ValueNode* context, ValueNode* value,
-                               int offset) {
+  void ProcessStoreContextSlot(ValueNode* context, ValueNode* value, int offset,
+                               MaybeAssignedFlag maybe_assigned) {
     known_node_aspects().ClearAliasedContextSlotsFor(graph_, context, offset,
                                                      value);
-    known_node_aspects().SetContextCachedValue(context, offset, value);
+    known_node_aspects().SetContextCachedValue(context, offset, value,
+                                               maybe_assigned);
   }
 
   template <typename NodeT>
@@ -315,7 +346,8 @@ class RecomputeKnownNodeAspectsProcessor {
     // If a store to a context, we use the specialized context slot cache.
     if (node->is_store_to_context()) {
       return ProcessStoreContextSlot(node->ObjectInput().node(),
-                                     node->ValueInput().node(), node->offset());
+                                     node->ValueInput().node(), node->offset(),
+                                     node->maybe_assigned());
     }
     // ... otherwise we try the properties cache.
     if (node->property_key().is_none()) return;
@@ -344,12 +376,11 @@ class RecomputeKnownNodeAspectsProcessor {
   template <typename NodeT>
   void ProcessLoadContextSlot(NodeT* node) {
     ValueNode* context = node->input_node(0);
+    MaybeAssignedFlag assigned = node->maybe_assigned();
     ValueNode*& cached_value = known_node_aspects().GetContextCachedValue(
-        context, node->offset(),
-        node->is_const() ? ContextSlotMutability::kImmutable
-                         : ContextSlotMutability::kMutable);
+        context, node->offset(), assigned);
     if (!cached_value) cached_value = node;
-    if (!node->is_const()) {
+    if (assigned == kMaybeAssigned) {
       known_node_aspects().UpdateMayHaveAliasingContexts(
           broker(), broker()->local_isolate(), context);
     }
@@ -367,25 +398,29 @@ class RecomputeKnownNodeAspectsProcessor {
 
   ProcessResult ProcessNode(StoreContextSlotWithWriteBarrier* node) {
     ProcessStoreContextSlot(node->ContextInput().node(),
-                            node->NewValueInput().node(), node->offset());
+                            node->NewValueInput().node(), node->offset(),
+                            kMaybeAssigned);
     return ProcessResult::kContinue;
   }
 
   ProcessResult ProcessNode(StoreSmiContextCell* node) {
     ProcessStoreContextSlot(graph_->GetConstant(node->context()),
-                            node->ValueInput().node(), node->slot_offset());
+                            node->ValueInput().node(), node->slot_offset(),
+                            kMaybeAssigned);
     return ProcessResult::kContinue;
   }
 
   ProcessResult ProcessNode(StoreInt32ContextCell* node) {
     ProcessStoreContextSlot(graph_->GetConstant(node->context()),
-                            node->ValueInput().node(), node->slot_offset());
+                            node->ValueInput().node(), node->slot_offset(),
+                            kMaybeAssigned);
     return ProcessResult::kContinue;
   }
 
   ProcessResult ProcessNode(StoreFloat64ContextCell* node) {
     ProcessStoreContextSlot(graph_->GetConstant(node->context()),
-                            node->ValueInput().node(), node->slot_offset());
+                            node->ValueInput().node(), node->slot_offset(),
+                            kMaybeAssigned);
     return ProcessResult::kContinue;
   }
 

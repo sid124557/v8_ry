@@ -326,6 +326,8 @@ inline Condition MaglevAssembler::CheckSmi(Register src) {
 }
 
 #ifdef V8_ENABLE_DEBUG_CODE
+// TODO(riscv): move this function to MacroAssembler as it is done on all other
+// ports.
 inline void MaglevAssembler::AssertMap(Register object) {
   if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
@@ -743,6 +745,18 @@ inline void MaglevAssembler::AddInt32(Register reg, int amount) {
   Add32(reg, reg, Operand(amount));
 }
 
+inline void MaglevAssembler::AddInt32(Register reg, Register other) {
+  Add32(reg, reg, other);
+}
+
+inline void MaglevAssembler::AddInt32(Register dst, Register src, int amount) {
+  Add32(dst, src, Operand(amount));
+}
+
+inline void MaglevAssembler::AndInt32(Register dst, Register src, int mask) {
+  Add32(dst, src, Operand(mask));
+}
+
 inline void MaglevAssembler::AndInt32(Register reg, int mask) {
   // check if size of immediate exceeds 32 bits
   if constexpr (sizeof(intptr_t) > sizeof(mask)) {
@@ -771,6 +785,33 @@ inline void MaglevAssembler::ShiftLeft(Register reg, int amount) {
   Sll32(reg, reg, Operand(amount));
 }
 
+inline void MaglevAssembler::ShiftRightLogical32(Register dst, int32_t value) {
+  Srl32(dst, dst, Operand(value));
+}
+inline void MaglevAssembler::ShiftRightLogical32(Register dst, Register src,
+                                                 int32_t value) {
+  Srl32(dst, src, Operand(value));
+}
+inline void MaglevAssembler::SubInt32(Register dst, Register src) {
+  Sub32(dst, dst, src);
+}
+inline void MaglevAssembler::SubInt32(Register dst, Register src1,
+                                      Register src2) {
+  Sub32(dst, src1, src2);
+}
+inline void MaglevAssembler::LoadBitsFromWord32(Register dst, Register src,
+                                                int width, int shift) {
+  if (dst != src) {
+    mv(dst, src);
+  }
+  if (shift != 0) {
+    Srl32(dst, dst, Operand(shift));
+  }
+  if (shift + width < 32) {
+    And(dst, dst, Operand((1 << width) - 1));
+  }
+}
+
 inline void MaglevAssembler::IncrementAddress(Register reg, int32_t delta) {
   Add64(reg, reg, Operand(delta));
 }
@@ -782,9 +823,12 @@ inline void MaglevAssembler::LoadAddress(Register dst, MemOperand location) {
 
 inline void MaglevAssembler::EmitEnterExitFrame(int extra_slots,
                                                 StackFrame::Type frame_type,
-                                                Register c_function,
                                                 Register scratch) {
   EnterExitFrame(scratch, extra_slots, frame_type);
+}
+
+inline void MaglevAssembler::MakeWeak(Register dst, Register src) {
+  Or(dst, src, Operand(kWeakHeapObjectTag));
 }
 
 inline void MaglevAssembler::Move(StackSlot dst, Register src) {
@@ -882,7 +926,7 @@ inline void MaglevAssembler::LoadUnalignedFloat64(DoubleRegister dst,
   MaglevAssembler::TemporaryRegisterScope temps(this);
   Register address = temps.AcquireScratch();
   Add64(address, base, index);
-  ULoadDouble(dst, MemOperand(address));
+  LoadDouble(dst, MemOperand(address));
 }
 inline void MaglevAssembler::LoadUnalignedFloat64AndReverseByteOrder(
     DoubleRegister dst, Register base, Register index) {
@@ -890,7 +934,7 @@ inline void MaglevAssembler::LoadUnalignedFloat64AndReverseByteOrder(
   Register address = temps.AcquireScratch();
   Add64(address, base, index);
   Register scratch = base;  // reuse base as scratch register
-  Uld(scratch, MemOperand(address));
+  LoadWord(scratch, MemOperand(address));
   ByteSwap(scratch, scratch, 8, address);
   MacroAssembler::Move(dst, scratch);
 }
@@ -900,7 +944,7 @@ inline void MaglevAssembler::StoreUnalignedFloat64(Register base,
   MaglevAssembler::TemporaryRegisterScope temps(this);
   Register address = temps.AcquireScratch();
   Add64(address, base, index);
-  UStoreDouble(src, MemOperand(address));
+  StoreDouble(src, MemOperand(address));
 }
 inline void MaglevAssembler::ReverseByteOrderAndStoreUnalignedFloat64(
     Register base, Register index, DoubleRegister src) {
@@ -910,7 +954,7 @@ inline void MaglevAssembler::ReverseByteOrderAndStoreUnalignedFloat64(
   MacroAssembler::Move(scratch, src);
   ByteSwap(scratch, scratch, 8, address);  // reuse address as scratch register
   Add64(address, base, index);
-  Usd(scratch, MemOperand(address));
+  StoreWord(scratch, MemOperand(address));
 }
 
 inline void MaglevAssembler::SignExtend32To64Bits(Register dst, Register src) {
@@ -951,30 +995,10 @@ inline void MaglevAssembler::ToUint8Clamped(Register result,
   MacroAssembler::Branch(max,  // value >= 255.0
                          not_equal, scratch, Operand(zero_reg));
 
-  // value in (0.0, 255.0)
-  fmv_x_d(result, value);
-  // check if fractional part in result is absent
-  Label has_fraction;
-  Mv(scratch, result);
-  SllWord(scratch, scratch, Operand(64 - kFloat64MantissaBits));
-  MacroAssembler::Branch(&has_fraction, not_equal, scratch, Operand(zero_reg));
-  // no fractional part, compute exponent part taking bias into account.
-  SrlWord(result, result, Operand(kFloat64MantissaBits));
-  SubWord(result, result, kFloat64ExponentBias);
-  MacroAssembler::Branch(done);
-
-  bind(&has_fraction);
-  // Actual rounding is here. Notice that ToUint8Clamp does “round half to even”
-  // tie-breaking and that differs from Math.round which does “round half up”
-  // tie-breaking.
-  fcvt_l_d(scratch, value, RNE);
-  fcvt_d_l(ftmp1, scratch, RNE);
-  // A special handling is needed if the result is a very small positive number
-  // that rounds to zero. JS semantics requires that the rounded result retains
-  // the sign of the input, so a very small positive floating-point number
-  // should be rounded to positive 0.
-  fsgnj_d(ftmp1, ftmp1, value);
-  fmv_x_d(result, ftmp1);
+  // value in (0.0, 255.0): round to nearest even, then store as integer.
+  // fcvt.l.d converts float64 to int64 with round-to-nearest-even (RNE),
+  // matching the ECMA-262 §7.1.12 ToUint8Clamp rounding semantics.
+  fcvt_l_d(result, value, RNE);
   MacroAssembler::Branch(done);
 }
 
@@ -1457,14 +1481,58 @@ void MaglevAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
 }
 
 void MaglevAssembler::Float64SilenceNan(DoubleRegister value) {
-  MaglevAssembler::TemporaryRegisterScope temps(this);
-  Register scratch = temps.AcquireScratch();
-  Register scratch2 = temps.AcquireScratch();
-  li(scratch, Operand(kDQuietNanMask));
-  fmv_x_d(scratch2, value);
-  Or(scratch2, scratch2, Operand(scratch));
-  fmv_d_x(value, scratch2);
+  FPUCanonicalizeNaN(value, value);
 }
+
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+void MaglevAssembler::JumpIfUndefinedNan(DoubleRegister value, Register scratch,
+                                         Label* target,
+                                         Label::Distance distance) {
+  ASM_CODE_COMMENT(this);
+  // TODO(leszeks): Right now this only accepts Zone-allocated target labels.
+  // This works because all callsites are jumping to either a deopt, deferred
+  // code, or a basic block. If we ever need to jump to an on-stack label, we
+  // have to add support for it here change the caller to pass a ZoneLabelRef.
+  DCHECK(compilation_info()->zone()->Contains(target));
+  ZoneLabelRef is_undefined = ZoneLabelRef::UnsafeFromLabelPointer(target);
+  ZoneLabelRef is_not_undefined(this);
+  JumpIfNan(
+      value,
+      MakeDeferredCode(
+          [](MaglevAssembler* masm, DoubleRegister value, Register scratch,
+             ZoneLabelRef is_undefined, ZoneLabelRef is_not_undefined) {
+            masm->fmv_x_w(scratch, value);
+            masm->MacroAssembler::Branch(
+                *is_undefined, kEqual, scratch,
+                Operand(static_cast<int32_t>(kUndefinedNanUpper32)));
+            masm->Jump(*is_not_undefined);
+          },
+          value, scratch, is_undefined, is_not_undefined));
+  bind(*is_not_undefined);
+}
+
+void MaglevAssembler::JumpIfUndefinedNan(MemOperand operand, Label* target,
+                                         Label::Distance distance) {
+  ASM_CODE_COMMENT(this);
+  MaglevAssembler::TemporaryRegisterScope temps(this);
+  Register upper_bits = temps.AcquireScratch();
+  DCHECK(operand.is_reg());
+  Lw(upper_bits,
+     MemOperand(operand.rm(), operand.offset() + (kDoubleSize / 2)));
+  MacroAssembler::Branch(target, eq, upper_bits,
+                         Operand(static_cast<int32_t>(kUndefinedNanUpper32)));
+}
+
+void MaglevAssembler::JumpIfNotUndefinedNan(DoubleRegister value,
+                                            Register scratch, Label* target,
+                                            Label::Distance distance) {
+  ASM_CODE_COMMENT(this);
+  JumpIfNotNan(value, target, distance);
+  fmv_x_w(scratch, value);
+  MacroAssembler::Branch(target, ne, scratch,
+                         Operand(static_cast<int32_t>(kUndefinedNanUpper32)));
+}
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
 
 void MaglevAssembler::JumpIfHoleNan(DoubleRegister value, Register scratch,
                                     Label* target, Label::Distance distance) {

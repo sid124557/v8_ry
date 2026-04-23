@@ -138,7 +138,8 @@ TNode<BytecodeArray> InterpreterAssembler::BytecodeArrayTaggedPointer() {
   // Force a re-load of the bytecode array after every call in case the debugger
   // has been activated.
   if (!bytecode_array_valid_) {
-    bytecode_array_ = CAST(LoadRegister(Register::bytecode_array()));
+    bytecode_array_ = TrustedCast<BytecodeArray>(
+        LoadRegister(Register::bytecode_array()), "from trusted register");
     bytecode_array_valid_ = true;
   }
   return bytecode_array_.value();
@@ -768,8 +769,9 @@ TNode<IntPtrT> InterpreterAssembler::BytecodeOperandOffset(int operand_index) {
 }
 
 TNode<Object> InterpreterAssembler::LoadConstantPoolEntry(TNode<WordT> index) {
-  TNode<TrustedFixedArray> constant_pool = CAST(LoadProtectedPointerField(
-      BytecodeArrayTaggedPointer(), BytecodeArray::kConstantPoolOffset));
+  TNode<TrustedFixedArray> constant_pool =
+      LoadProtectedPointerField<TrustedFixedArray>(
+          BytecodeArrayTaggedPointer(), BytecodeArray::kConstantPoolOffset);
   return CAST(LoadArrayElement(constant_pool,
                                OFFSET_OF_DATA_START(TrustedFixedArray),
                                UncheckedCast<IntPtrT>(index), 0));
@@ -851,7 +853,7 @@ void InterpreterAssembler::CallJSAndDispatch(TNode<JSAny> function,
   DCHECK(Bytecodes::IsCallOrConstruct(bytecode_) ||
          bytecode_ == Bytecode::kInvokeIntrinsic);
   DCHECK_EQ(Bytecodes::GetReceiverMode(bytecode_), receiver_mode);
-  Builtin builtin = Builtins::Call();
+  Builtin builtin = Builtins::Call(receiver_mode);
 
   arg_count = JSParameterCount(arg_count);
   if (receiver_mode == ConvertReceiverMode::kNullOrUndefined) {
@@ -1160,13 +1162,13 @@ TNode<Int32T> InterpreterAssembler::UpdateInterruptBudget(
   TNode<FeedbackCell> feedback_cell =
       LoadObjectField<FeedbackCell>(function, JSFunction::kFeedbackCellOffset);
   TNode<Int32T> old_budget = LoadObjectField<Int32T>(
-      feedback_cell, FeedbackCell::kInterruptBudgetOffset);
+      feedback_cell, offsetof(FeedbackCell, interrupt_budget_));
 
   // Update budget by |weight| and check if it reaches zero.
   TNode<Int32T> new_budget = Int32Sub(old_budget, weight);
   // Update budget.
   StoreObjectFieldNoWriteBarrier(
-      feedback_cell, FeedbackCell::kInterruptBudgetOffset, new_budget);
+      feedback_cell, offsetof(FeedbackCell, interrupt_budget_), new_budget);
   return new_budget;
 }
 
@@ -1395,10 +1397,6 @@ void InterpreterAssembler::DispatchToBytecodeWithOptionalStarLookahead(
 
 void InterpreterAssembler::DispatchToBytecode(
     TNode<WordT> target_bytecode, TNode<IntPtrT> new_bytecode_offset) {
-  if (V8_IGNITION_DISPATCH_COUNTING_BOOL) {
-    TraceBytecodeDispatch(target_bytecode);
-  }
-
   TNode<RawPtrT> target_code_entry = Load<RawPtrT>(
       DispatchTablePointer(), TimesSystemPointerSize(target_bytecode));
 
@@ -1423,10 +1421,6 @@ void InterpreterAssembler::DispatchWide(OperandScale operand_scale) {
   DCHECK_IMPLIES(Bytecodes::MakesCallAlongCriticalPath(bytecode_), made_call_);
   TNode<IntPtrT> next_bytecode_offset = Advance(1);
   TNode<WordT> next_bytecode = LoadBytecode(next_bytecode_offset);
-
-  if (V8_IGNITION_DISPATCH_COUNTING_BOOL) {
-    TraceBytecodeDispatch(next_bytecode);
-  }
 
   TNode<IntPtrT> base_index;
   switch (operand_scale) {
@@ -1524,8 +1518,9 @@ void InterpreterAssembler::OnStackReplacement(
     // Is it marked_for_deoptimization? If yes, clear the slot.
     TNode<CodeWrapper> code_wrapper = CAST(maybe_target_code.value());
     maybe_target_code =
-        LoadCodePointerFromObject(code_wrapper, CodeWrapper::kCodeOffset);
-    GotoIfNot(IsMarkedForDeoptimization(CAST(maybe_target_code.value())),
+        LoadCodePointerFromObject(code_wrapper, offsetof(CodeWrapper, code_));
+    GotoIfNot(IsMarkedForDeoptimization(TrustedCast<Code>(
+                  maybe_target_code.value(), "read access only")),
               &osr_to_opt);
     StoreFeedbackVectorSlot(feedback_vector, Unsigned(feedback_slot),
                             ClearedValue(), UNSAFE_SKIP_WRITE_BARRIER);
@@ -1595,33 +1590,6 @@ void InterpreterAssembler::OnStackReplacement(
 void InterpreterAssembler::TraceBytecode(Runtime::FunctionId function_id) {
   CallRuntime(function_id, GetContext(), BytecodeArrayTaggedPointer(),
               SmiTag(BytecodeOffset()), GetAccumulatorUnchecked());
-}
-
-void InterpreterAssembler::TraceBytecodeDispatch(TNode<WordT> target_bytecode) {
-  TNode<ExternalReference> counters_table = ExternalConstant(
-      ExternalReference::interpreter_dispatch_counters(isolate()));
-  TNode<IntPtrT> source_bytecode_table_index = IntPtrConstant(
-      static_cast<int>(bytecode_) * (static_cast<int>(Bytecode::kLast) + 1));
-
-  TNode<WordT> counter_offset = TimesSystemPointerSize(
-      IntPtrAdd(source_bytecode_table_index, target_bytecode));
-  TNode<IntPtrT> old_counter = Load<IntPtrT>(counters_table, counter_offset);
-
-  Label counter_ok(this), counter_saturated(this, Label::kDeferred);
-
-  TNode<BoolT> counter_reached_max = WordEqual(
-      old_counter, IntPtrConstant(std::numeric_limits<uintptr_t>::max()));
-  Branch(counter_reached_max, &counter_saturated, &counter_ok);
-
-  BIND(&counter_ok);
-  {
-    TNode<IntPtrT> new_counter = IntPtrAdd(old_counter, IntPtrConstant(1));
-    StoreNoWriteBarrier(MachineType::PointerRepresentation(), counters_table,
-                        counter_offset, new_counter);
-    Goto(&counter_saturated);
-  }
-
-  BIND(&counter_saturated);
 }
 
 // static

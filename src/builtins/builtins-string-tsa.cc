@@ -34,7 +34,7 @@ TS_BUILTIN(StringFromCodePointAt, StringBuiltinsAssemblerTS) {
   Return(result);
 }
 
-// ES6 #sec-string.fromcharcode
+// https://tc39.es/ecma262/#sec-string.fromcharcode
 TS_BUILTIN(StringFromCharCode, StringBuiltinsAssemblerTS) {
   V<Context> context = Parameter<Context>(Descriptor::kContext);
   V<Word32> argc = Parameter<Word32>(Descriptor::kJSActualArgumentsCount);
@@ -112,11 +112,13 @@ TS_BUILTIN(StringFromCharCode, StringBuiltinsAssemblerTS) {
   }
 }
 
+#ifndef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
 TS_BUILTIN(ToString, StringBuiltinsAssemblerTS) {
   V<Context> context = Parameter<Context>(Descriptor::kContext);
   V<JSAny> o = Parameter<JSAny>(Descriptor::kO);
   Return(ToStringImpl(context, o));
 }
+#endif  // !V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
 
 #endif  // V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
 

@@ -8,6 +8,7 @@
 #include "src/base/iterator.h"
 #include "src/builtins/builtins-descriptors.h"
 #include "src/builtins/builtins-inl.h"
+#include "src/builtins/superspread.h"
 #include "src/codegen/code-factory.h"
 #include "src/codegen/interface-descriptors-inl.h"
 // For interpreter_entry_return_pc_offset. TODO(jkummerow): Drop.
@@ -28,7 +29,6 @@
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/baseline/liftoff-assembler-defs.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -62,6 +62,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(
       data,
       FieldMemOperand(sfi, SharedFunctionInfo::kTrustedFunctionDataOffset));
 
+  __ JumpIfSmi(data, is_unavailable);
   __ LoadMap(scratch1, data);
   __ LoadU16(scratch1, FieldMemOperand(scratch1, Map::kInstanceTypeOffset));
 
@@ -212,7 +213,7 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
   __ LoadTaggedField(
       feedback_vector,
-      FieldMemOperand(feedback_cell, FeedbackCell::kValueOffset));
+      FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)));
 
   Label install_baseline_code;
   // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -629,15 +630,16 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // -----------------------------------
   // Store input value into generator object.
   __ StoreTaggedField(
-      r2, FieldMemOperand(r3, JSGeneratorObject::kInputOrDebugPosOffset), r0);
-  __ RecordWriteField(r3, JSGeneratorObject::kInputOrDebugPosOffset, r2, r5,
-                      kLRHasNotBeenSaved, SaveFPRegsMode::kIgnore);
+      r2, FieldMemOperand(r3, offsetof(JSGeneratorObject, input_or_debug_pos_)),
+      r0);
+  __ RecordWriteField(r3, offsetof(JSGeneratorObject, input_or_debug_pos_), r2,
+                      r5, kLRHasNotBeenSaved, SaveFPRegsMode::kIgnore);
   // Check that r3 is still valid, RecordWrite might have clobbered it.
   __ AssertGeneratorObject(r3);
 
   // Load suspended function and context.
-  __ LoadTaggedField(r6,
-                     FieldMemOperand(r3, JSGeneratorObject::kFunctionOffset));
+  __ LoadTaggedField(
+      r6, FieldMemOperand(r3, offsetof(JSGeneratorObject, function_)));
   __ LoadTaggedField(cp, FieldMemOperand(r6, JSFunction::kContextOffset));
 
   // Flood function if we are stepping.
@@ -663,14 +665,6 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   __ beq(&prepare_step_in_suspended_generator);
   __ bind(&stepping_prepared);
 
-  // Check the stack for overflow. We are not trying to catch interruptions
-  // (i.e. debug break and preemption) here, so check the "real stack limit".
-  Label stack_overflow;
-  __ LoadU64(scratch,
-             __ StackLimitAsMemOperand(StackLimitKind::kRealStackLimit));
-  __ CmpU64(sp, scratch);
-  __ blt(&stack_overflow);
-
   // ----------- S t a t e -------------
   //  -- r3    : the JSGeneratorObject to resume
   //  -- r6    : generator function
@@ -685,8 +679,12 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
       r5, FieldMemOperand(r5, SharedFunctionInfo::kFormalParameterCountOffset));
   __ SubS64(r5, r5, Operand(kJSArgcReceiverSlots));
   __ LoadTaggedField(
-      r4,
-      FieldMemOperand(r3, JSGeneratorObject::kParametersAndRegistersOffset));
+      r4, FieldMemOperand(
+              r3, offsetof(JSGeneratorObject, parameters_and_registers_)));
+
+  Label stack_overflow;
+  __ StackOverflowCheck(r5, scratch, &stack_overflow);
+
   {
     Label done_loop, loop;
     __ bind(&loop);
@@ -701,8 +699,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ bind(&done_loop);
 
     // Push receiver.
-    __ LoadTaggedField(scratch,
-                       FieldMemOperand(r3, JSGeneratorObject::kReceiverOffset));
+    __ LoadTaggedField(
+        scratch, FieldMemOperand(r3, offsetof(JSGeneratorObject, receiver_)));
     __ Push(scratch);
   }
 
@@ -747,8 +745,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ PushRoot(RootIndex::kTheHoleValue);
     __ CallRuntime(Runtime::kDebugOnFunctionCall);
     __ Pop(r3);
-    __ LoadTaggedField(r6,
-                       FieldMemOperand(r3, JSGeneratorObject::kFunctionOffset));
+    __ LoadTaggedField(
+        r6, FieldMemOperand(r3, offsetof(JSGeneratorObject, function_)));
   }
   __ b(&stepping_prepared);
 
@@ -758,8 +756,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ Push(r3);
     __ CallRuntime(Runtime::kDebugPrepareStepInSuspendedGenerator);
     __ Pop(r3);
-    __ LoadTaggedField(r6,
-                       FieldMemOperand(r3, JSGeneratorObject::kFunctionOffset));
+    __ LoadTaggedField(
+        r6, FieldMemOperand(r3, offsetof(JSGeneratorObject, function_)));
   }
   __ b(&stepping_prepared);
 
@@ -1274,7 +1272,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
   __ LoadTaggedField(
       feedback_vector,
-      FieldMemOperand(feedback_cell, FeedbackCell::kValueOffset));
+      FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)));
   __ AssertFeedbackVector(feedback_vector, r1);
 
 
@@ -1425,7 +1423,16 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   Label push_stack_frame;
   Register feedback_vector = r4;
-  __ LoadFeedbackVector(feedback_vector, closure, r6, &push_stack_frame);
+  Register feedback_cell = r6;
+
+  __ LoadFeedbackCell(feedback_cell, closure);
+
+  Label budget_interrupt;
+  Label after_budget_check;
+
+  __ mov(ip, feedback_cell);
+  __ LoadFeedbackVectorFromCell(feedback_vector, feedback_cell, r1,
+                                &push_stack_frame);
 
 #ifndef V8_JITLESS
 
@@ -1501,6 +1508,17 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   __ StoreU64(r5, MemOperand(fp, r8));
   __ bind(&no_incoming_new_target_or_generator_register);
 
+  // Reduce interrupt budget.
+  __ LoadS32(r1,
+             FieldMemOperand(ip, offsetof(FeedbackCell, interrupt_budget_)));
+  __ SmiUntagField(r8, FieldMemOperand(kInterpreterBytecodeArrayRegister,
+                                       BytecodeArray::kLengthOffset));
+  __ SubS32(r1, r1, r8);
+  __ StoreU32(r1,
+              FieldMemOperand(ip, offsetof(FeedbackCell, interrupt_budget_)));
+  __ blt(&budget_interrupt);
+  __ bind(&after_budget_check);
+
   // Perform interrupt stack check.
   // TODO(solanes): Merge with the real stack limit check above.
   Label stack_check_interrupt, after_stack_check_interrupt;
@@ -1564,6 +1582,21 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   LeaveInterpreterFrame(masm, r4, r6);
   __ Ret();
 
+  __ bind(&budget_interrupt);
+  __ LoadU64(r2, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+  __ Push(r2);
+  __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Ignition, 1);
+
+  // After the call, restore the bytecode array, bytecode offset and accumulator
+  // registers again.
+  __ LoadU64(kInterpreterBytecodeArrayRegister,
+             MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+  __ mov(kInterpreterBytecodeOffsetRegister,
+         Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+  __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+
+  __ b(&after_budget_check);
+
   __ bind(&stack_check_interrupt);
   // Modify the bytecode offset in the stack to be kFunctionEntryBytecodeOffset
   // for the call to the StackGuard.
@@ -1598,7 +1631,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 #endif  // !V8_JITLESS
 
   __ bind(&compile_lazy);
-  __ GenerateTailCallToReturnedCode(Runtime::kCompileLazy);
+  __ TailCallBuiltin(Builtin::kCompileLazy);
 
   __ bind(&stack_overflow);
   __ CallRuntime(Runtime::kThrowStackOverflow);
@@ -2536,7 +2569,23 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
   __ TailCallBuiltin(target_builtin);
 
   __ bind(&stack_overflow);
-  __ TailCallRuntime(Runtime::kThrowStackOverflow);
+  // Rewrite the stack frame to capture target, arguments list and length
+  // - receiver already on the stack.
+  static_assert(SuperSpreadArgs::kReceiverOffsetFromEnd == 4);
+  // - target
+  static_assert(SuperSpreadArgs::kTargetOffsetFromEnd == 3);
+  __ Push(r3);
+  // - arguments list
+  static_assert(SuperSpreadArgs::kArglistOffsetFromEnd == 2);
+  __ Push(r4);
+  // - len of arguments list
+  static_assert(SuperSpreadArgs::kArglistLengthOffsetFromEnd == 1);
+  __ SmiTag(r6);
+  __ Push(r6);
+  // - adjust arg count
+  __ AddS64(r2, r2, Operand(SuperSpreadArgs::kNumExtraArgs - 1));
+
+  __ TailCallRuntime(Runtime::kVarargStackOverflow);
 }
 
 // static
@@ -3062,6 +3111,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
 
     {
+      // Save all parameters and restore them before jumping to the generated
+      // code later. The spilled parameters are *not* visited by GC, but the
+      // `WasmCompileLazy` runtime function does not trigger GC except for
+      // exceptions (and then we unwind before using the spilled values).
       SaveWasmParamsScope save_params(masm);
 
       // Push the instance data as an explicit argument to the runtime function.
@@ -3148,7 +3201,8 @@ void SwitchStacks(MacroAssembler* masm, ExternalReference fn,
   }
 
   {
-    bool is_return = fn == ExternalReference::wasm_return_stack();
+    bool is_return = fn == ExternalReference::wasm_return_jspi_stack() ||
+                     fn == ExternalReference::wasm_return_wasmfx_stack();
     int num_args = is_return ? 2 : maybe_suspender.is_valid() ? 6 : 5;
     __ PrepareCallCFunction(num_args, r0);
     FrameScope scope(masm, StackFrame::MANUAL);
@@ -3184,8 +3238,8 @@ void ReloadParentStack(MacroAssembler* masm, Register return_reg,
   __ LoadU64(parent, MemOperand(active_stack, wasm::kStackParentOffset));
 
   // Switch stack!
-  SwitchStacks(masm, ExternalReference::wasm_return_stack(), parent, nullptr,
-               no_reg, {return_reg, return_value, context, parent});
+  SwitchStacks(masm, ExternalReference::wasm_return_jspi_stack(), parent,
+               nullptr, no_reg, {return_reg, return_value, context, parent});
   LoadJumpBuffer(masm, parent, false, tmp3);
 }
 
@@ -3446,10 +3500,7 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
   // -------------------------------------------
   DEFINE_REG(sfi);
   __ LoadTaggedField(
-      sfi,
-      MemOperand(
-          closure,
-          wasm::ObjectAccess::SharedFunctionInfoOffsetInTaggedJSFunction()));
+      sfi, FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
   FREE_REG(closure);
   // Suspender should be ObjectRegister register to be used in
   // RecordWriteField calls later.
@@ -3543,18 +3594,24 @@ void Builtins::Generate_WasmFXResume(MacroAssembler* masm) {
 void Builtins::Generate_WasmFXResumeThrow(MacroAssembler* masm) {
   __ EnterFrame(StackFrame::WASM_STACK_EXIT);
   Register target_stack = WasmFXResumeThrowDescriptor::GetRegisterParameter(0);
-  // The target stack may not have a frame yet. In that case, do not switch
-  // stacks and throw the exception immediately instead.
+  Register tag = WasmFXResumeThrowDescriptor::GetRegisterParameter(1);
+  Register array = WasmFXResumeThrowDescriptor::GetRegisterParameter(2);
+  Register trusted_instance_data =
+      WasmFXResumeThrowDescriptor::GetRegisterParameter(3);
+  // If the target stack is in a suspended state, switch to it and throw the
+  // exception from there.
+  // If the stack has not been started yet, switching to it is invalid as it
+  // does not have a stack entry frame. Instead, retire it and throw the
+  // exception from the current stack.
+  // Both blocks exit with the arguments of the runtime call pushed on the
+  // stack.
   Register scratch = r1;
   DCHECK(!AreAliased(scratch, target_stack));
   __ LoadU64(scratch, MemOperand(target_stack, wasm::kStackFpOffset));
   __ CmpU64(scratch, Operand(kNullAddress));
   Label throw_;
-  __ beq(&throw_);
-  Register tag = WasmFXResumeThrowDescriptor::GetRegisterParameter(1);
-  Register array = WasmFXResumeThrowDescriptor::GetRegisterParameter(2);
-  Register trusted_instance_data =
-      WasmFXResumeThrowDescriptor::GetRegisterParameter(3);
+  Label retire_and_throw;
+  __ beq(&retire_and_throw);
   Label return_;
   SwitchStacks(masm, ExternalReference::wasm_resume_wasmfx_stack(),
                target_stack, &return_, no_reg,
@@ -3563,13 +3620,77 @@ void Builtins::Generate_WasmFXResumeThrow(MacroAssembler* masm) {
   scratch = r7;
   DCHECK(!AreAliased(scratch, target_stack));
   LoadJumpBuffer(masm, target_stack, false, scratch);
-  __ bind(&throw_);
-  // Throw the exception.
   __ Push(tag);
   __ Push(array);
   __ Push(trusted_instance_data);
+  __ b(&throw_);
+
+  __ bind(&retire_and_throw);
+  __ Push(tag);
+  __ Push(array);
+  __ Push(trusted_instance_data);
+  {
+    FrameScope scope(masm, StackFrame::MANUAL);
+    __ PrepareCallCFunction(2, r0);
+    __ Move(kCArgRegs[0], ExternalReference::isolate_address());
+    __ Move(kCArgRegs[1], target_stack);
+    __ CallCFunction(ExternalReference::wasm_retire_stack(), 2);
+  }
+
+  __ bind(&throw_);
+  // Throw the exception.
   __ Move(kContextRegister, Smi::zero());
   __ CallRuntime(Runtime::kWasmThrow);
+  __ Trap();
+  __ bind(&return_);
+  // Return the arg buffer.
+  __ Move(kReturnRegister0, WasmFXReturnDescriptor::GetRegisterParameter(0));
+  __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ Ret();
+}
+
+void Builtins::Generate_WasmFXResumeThrowRef(MacroAssembler* masm) {
+  __ EnterFrame(StackFrame::WASM_STACK_EXIT);
+  Register target_stack =
+      WasmFXResumeThrowRefDescriptor::GetRegisterParameter(0);
+  Register exnref = WasmFXResumeThrowRefDescriptor::GetRegisterParameter(1);
+  // If the target stack is in a suspended state, switch to it and throw the
+  // exception from there.
+  // If the stack has not been started yet, switching to it is invalid as it
+  // does not have a stack entry frame. Instead, retire it and throw the
+  // exception from the current stack.
+  // Both blocks exit with the exnref pushed on the stack.
+  Register scratch = r1;
+  DCHECK(!AreAliased(scratch, target_stack));
+  __ LoadU64(scratch, MemOperand(target_stack, wasm::kStackFpOffset));
+  __ CmpU64(scratch, Operand(kNullAddress));
+  Label throw_;
+  Label retire_and_throw;
+  __ beq(&retire_and_throw);
+  Label return_;
+  SwitchStacks(masm, ExternalReference::wasm_resume_wasmfx_stack(),
+               target_stack, &return_, no_reg, {target_stack, exnref});
+  // Switch to the target stack without restoring the PC.
+  LoadJumpBuffer(masm, target_stack, false, r7);
+  __ Push(exnref);
+  __ b(&throw_);
+
+  __ bind(&retire_and_throw);
+  __ Push(exnref);
+  {
+    FrameScope scope(masm, StackFrame::MANUAL);
+    __ PrepareCallCFunction(2, r0);
+    __ Move(kCArgRegs[0], ExternalReference::isolate_address());
+    __ Move(kCArgRegs[1], target_stack);
+    __ CallCFunction(ExternalReference::wasm_retire_stack(), 2);
+  }
+
+  __ bind(&throw_);
+  // Throw the exnref. The builtin expects to be called from a wasm frame, so
+  // leave this frame first and tail call WasmThrowRef.
+  __ Pop(WasmThrowRefDescriptor::GetRegisterParameter(0));
+  __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ TailCallBuiltin(Builtin::kWasmThrowRef);
   __ Trap();
   __ bind(&return_);
   // Return the arg buffer.
@@ -3583,20 +3704,27 @@ void Builtins::Generate_WasmFXSuspend(MacroAssembler* masm) {
   Register tag = WasmFXSuspendDescriptor::GetRegisterParameter(0);
   Register cont = WasmFXSuspendDescriptor::GetRegisterParameter(1);
   Register arg_buffer = WasmFXSuspendDescriptor::GetRegisterParameter(2);
+  MemOperand sig_op(fp, 2 * kSystemPointerSize);
   Label resume;
   __ Push(arg_buffer);
   __ Push(cont, kContextRegister);
   {
     FrameScope scope(masm, StackFrame::MANUAL);
-    __ PrepareCallCFunction(6, r0);
+    __ PrepareCallCFunction(8, r0);
     __ StoreU64(cont, MemOperand(sp, kStackFrameExtraParamSlot *
                                          kSystemPointerSize));  // arg 5
+    __ StoreU64(arg_buffer, MemOperand(sp, (kStackFrameExtraParamSlot + 1) *
+                                               kSystemPointerSize));  // arg 6
+    Register sig = arg_buffer;
+    __ LoadU64(sig, sig_op);
+    __ StoreU64(sig, MemOperand(sp, (kStackFrameExtraParamSlot + 2) *
+                                        kSystemPointerSize));  // arg 7
     __ Move(kCArgRegs[4], tag);
     __ Move(kCArgRegs[0], ExternalReference::isolate_address());
     __ Move(kCArgRegs[1], sp);
     __ Move(kCArgRegs[2], fp);
     __ GetLabelAddress(kCArgRegs[3], &resume);
-    __ CallCFunction(ExternalReference::wasm_suspend_wasmfx_stack(), 6);
+    __ CallCFunction(ExternalReference::wasm_suspend_wasmfx_stack(), 8);
   }
   Register target_stack = r3;
   __ Move(target_stack, kReturnRegister0);
@@ -3607,7 +3735,8 @@ void Builtins::Generate_WasmFXSuspend(MacroAssembler* masm) {
   __ CmpU64(target_stack, Operand(0));
   __ bne(&ok);
   // No handler found.
-  __ CallRuntime(Runtime::kThrowWasmSuspendError);
+  __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ TailCallBuiltin(Builtin::kThrowWasmTrapSuspend);
 
   __ bind(&ok);
   DCHECK_EQ(cont, kReturnRegister0);
@@ -3617,6 +3746,74 @@ void Builtins::Generate_WasmFXSuspend(MacroAssembler* masm) {
   __ bind(&resume);
   __ Move(kReturnRegister0, WasmFXResumeDescriptor::GetRegisterParameter(1));
   __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ Drop(WasmFXSuspendDescriptor::GetStackParameterCount());
+  __ Ret();
+}
+
+void Builtins::Generate_WasmFXSwitch(MacroAssembler* masm) {
+  __ EnterFrame(StackFrame::WASM_STACK_EXIT);
+  Register tag = WasmFXSwitchDescriptor::GetRegisterParameter(0);
+  Register cont = WasmFXSwitchDescriptor::GetRegisterParameter(1);
+  Register target_stack_reg = WasmFXSwitchDescriptor::GetRegisterParameter(2);
+  Register arg_buffer_reg = WasmFXSwitchDescriptor::GetRegisterParameter(3);
+  MemOperand sig_op(fp, 2 * kSystemPointerSize);
+  Label resume;
+  Register scratch = r3;
+
+  __ Move(scratch,
+          MemOperand(target_stack_reg, wasm::StackMemory::arg_buffer_offset()));
+  __ Push(scratch);
+  __ Push(kContextRegister);
+  {
+    FrameScope scope(masm, StackFrame::MANUAL);
+    DCHECK(!AreAliased(kCArgRegs[4], cont, target_stack_reg, arg_buffer_reg));
+    __ PrepareCallCFunction(9, r0);
+    __ Move(kCArgRegs[4], tag);
+    __ StoreU64(cont,
+                MemOperand(sp, kStackFrameExtraParamSlot * kSystemPointerSize));
+    __ StoreU64(
+        target_stack_reg,
+        MemOperand(sp, (kStackFrameExtraParamSlot + 1) * kSystemPointerSize));
+    __ StoreU64(arg_buffer_reg, MemOperand(sp, (kStackFrameExtraParamSlot + 2) *
+                                                   kSystemPointerSize));
+
+    __ LoadU64(scratch, sig_op);
+    __ StoreU64(scratch, MemOperand(sp, (kStackFrameExtraParamSlot + 3) *
+                                            kSystemPointerSize));
+    __ Move(kCArgRegs[0], ExternalReference::isolate_address());
+    __ Move(kCArgRegs[1], sp);
+    __ Move(kCArgRegs[2], fp);
+    __ GetLabelAddress(kCArgRegs[3], &resume);
+    __ CallCFunction(ExternalReference::wasm_switch_wasmfx_stack(), 9);
+  }
+
+  Label ok;
+  __ CmpU64(kReturnRegister0, Operand(0));
+  __ bne(&ok);
+
+  // No handler found.
+  __ Pop(kContextRegister);  // Retrieve saved context.
+  __ Drop(1);                // Drop saved arg buffer.
+  __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ TailCallBuiltin(Builtin::kThrowWasmTrapSuspend);
+
+  __ bind(&ok);
+
+  Register target_stack = WasmFXResumeDescriptor::GetRegisterParameter(0);
+  // Load the arg buffer to set up resume of target stack
+  __ Move(target_stack, kReturnRegister0);
+
+  Register arg_buffer = WasmFXResumeDescriptor::GetRegisterParameter(1);
+  __ Drop(1);          // Drop saved context.
+  __ Pop(arg_buffer);  // Pick up saved arg_buffer.
+
+  DCHECK(!AreAliased(arg_buffer, target_stack, r3, sp, fp));
+  LoadJumpBuffer(masm, target_stack, true, r3);
+  __ Trap();
+  __ bind(&resume);
+  __ Move(kReturnRegister0, WasmFXResumeDescriptor::GetRegisterParameter(1));
+  __ LeaveFrame(StackFrame::WASM_STACK_EXIT);
+  __ Drop(WasmFXSwitchDescriptor::GetStackParameterCount());
   __ Ret();
 }
 
@@ -3628,8 +3825,8 @@ void Builtins::Generate_WasmFXReturn(MacroAssembler* masm) {
   Register parent = r4;
   DCHECK_NE(arg_buffer, parent);
   __ Move(parent, MemOperand(active_stack, wasm::kStackParentOffset));
-  SwitchStacks(masm, ExternalReference::wasm_return_stack(), parent, nullptr,
-               no_reg, {parent, arg_buffer});
+  SwitchStacks(masm, ExternalReference::wasm_return_wasmfx_stack(), parent,
+               nullptr, no_reg, {parent, arg_buffer});
   LoadJumpBuffer(masm, parent, true, r8);
   __ Trap();
 }
@@ -4561,7 +4758,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
 
     __ LoadU64(
         api_function_address,
-        FieldMemOperand(func_templ, FunctionTemplateInfo::kCallbackOffset));
+        FieldMemOperand(func_templ, offsetof(FunctionTemplateInfo, callback_)));
   }
   __ EnterExitFrame(scratch, FC::getExtraSlotsCountFrom<ExitFrameConstants>(),
                     StackFrame::API_CALLBACK_EXIT);
@@ -4585,30 +4782,69 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   Register no_thunk_arg = no_reg;
 
   MemOperand return_value_operand = MemOperand(fp, FC::kReturnValueOffset);
-  static constexpr int kSlotsToDropOnReturn =
+  constexpr int kSlotsToDropOnReturn =
       FC::kFunctionCallbackInfoApiArgsLength + kJSArgcReceiverSlots;
 
   const bool with_profiling =
       mode != CallApiCallbackMode::kOptimizedNoProfiling;
+  const bool handle_interceptor_result = false;
   CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
                            thunk_ref, no_thunk_arg, kSlotsToDropOnReturn,
-                           &argc_operand, return_value_operand);
+                           &argc_operand, return_value_operand,
+                           handle_interceptor_result);
 }
 
-void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+void Builtins::Generate_CallApiAccessorImpl(MacroAssembler* masm,
+                                            bool for_interceptor,
+                                            bool for_setter) {
   // ----------- S t a t e -------------
   //  -- cp                  : context
-  //  -- r5                  : accessor info
-  //  -- sp[1]               : receiver
+  //  -- r2                  : name
+  //  -- r5                  : accessor info / interceptor info
+  //  -- sp[2]               : value (only for setter case)
+  //  -- sp[1]               : should_throw_on_error (only for setter case)
   //  -- sp[0]               : holder
   // -----------------------------------
+
+  Register name_arg = no_reg;
+  Register value_arg = no_reg;
+  Register property_callback_info_arg = no_reg;
+
+  Register callback = CallApiGetterDescriptor::CallbackRegister();
+  Register scratch = r7;
+  Register scratch2 = r8;
+
+  // All variants pass callback in the same register.
+  CHECK_EQ(callback, CallApiGetterDescriptor::CallbackRegister());
+  CHECK_EQ(callback, CallApiSetterDescriptor::CallbackRegister());
+
+  if (for_setter) {
+    // Setter(Local<Name>, Local<Value>, const PropertyCallbackInfo<void>&);
+    name_arg = kCArgRegs[0];
+    value_arg = kCArgRegs[1];  // Will be initialized right before the call.
+    property_callback_info_arg = kCArgRegs[2];
+  } else {
+    // Getter(Local<Name>, const PropertyCallbackInfo<void>&);
+    name_arg = kCArgRegs[0];
+    property_callback_info_arg = kCArgRegs[1];
+  }
+
+  // |name| is already in the required register.
+  CHECK_EQ(name_arg, CallApiGetterDescriptor::NameRegister());
+  CHECK_EQ(name_arg, CallApiSetterDescriptor::NameRegister());
+
+  DCHECK(!AreAliased(name_arg, value_arg, property_callback_info_arg,  // C args
+                     callback, scratch, scratch2, cp));
 
   using PCA = PropertyCallbackArguments;
   using ER = ExternalReference;
   using FC = ApiAccessorExitFrameConstants;
 
-  static_assert(PCA::kGetterApiArgsLength == 5);
-  static_assert(PCA::ApiArgIndex(PCA::kThisIndex) == 4);
+  static_assert(PCA::kSetterApiArgsLength == 6);
+  static_assert(PCA::ApiArgIndex(PCA::kValueIndex) == 5);
+  static_assert(PCA::ApiArgIndex(PCA::kShouldThrowOnErrorIndex) == 4);
+
+  static_assert(PCA::kGetterApiArgsLength == 4);
   static_assert(PCA::ApiArgIndex(PCA::kHolderIndex) == 3);
   static_assert(PCA::ApiArgIndex(PCA::kCallbackInfoIndex) == 2);
   static_assert(PCA::ApiArgIndex(PCA::kReturnValueIndex) == 1);
@@ -4619,33 +4855,22 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   //  Current state            |  Target state
   // --------------------------+--------------------------------------------
   //                           |  ...
-  //                           |  sp[4]: receiver        <- kThisIndex
-  //                           |  sp[3]: holder          <- kHolderIndex
-  //  ...                      |  sp[2]: callback info   <- kCallbackInfoIndex
-  //  sp[1]: receiver          |  sp[1]: undefined       <- kReturnValueIndex
+  //                           |  sp[5]: value (setter)  <- kValueIndex
+  //                           |  sp[4]: throw? (setter) <- kShouldThrow..Index
+  //  ...                      |  sp[3]: holder          <- kHolderIndex
+  //  sp[2]: value (setter)    |  sp[2]: callback info   <- kCallbackInfoIndex
+  //  sp[1]: throw? (setter)   |  sp[1]: undefined       <- kReturnValueIndex
   //  sp[0]: holder            |  sp[0]: isolate         <- kIsolateIndex
   //
 
-  Register name_arg = kCArgRegs[0];
-  Register property_callback_info_arg = kCArgRegs[1];
-
-  Register api_function_address = r4;
-  Register callback = ApiGetterDescriptor::CallbackRegister();
-  Register undef = r6;
-  Register scratch = r7;
-
-  DCHECK(!AreAliased(callback, scratch, undef));
-
-  __ LoadRoot(undef, RootIndex::kUndefinedValue);
+  RootIndex default_value =
+      for_setter ? RootIndex::kTrueValue : RootIndex::kUndefinedValue;
+  __ LoadRoot(scratch2, default_value);
   __ Move(scratch, ER::isolate_address());
 
   __ Push(callback,  // kCallbackInfoIndex
-          undef,     // kReturnValueIndex
+          scratch2,  // kReturnValueIndex
           scratch);  // kIsolateIndex
-
-  __ RecordComment("Load api_function_address");
-  __ LoadU64(api_function_address,
-             FieldMemOperand(callback, AccessorInfo::kGetterOffset));
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ EnterExitFrame(scratch, FC::getExtraSlotsCountFrom<ExitFrameConstants>(),
@@ -4653,8 +4878,6 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
 
   {
     ASM_CODE_COMMENT_STRING(masm, "Initialize v8::PropertyCallbackInfo");
-    __ LoadTaggedField(
-        name_arg, FieldMemOperand(callback, AccessorInfo::kNameOffset), r1);
     // kPropertyKeyIndex
     __ StoreU64(name_arg, MemOperand(fp, FC::kPropertyKeyOffset));
 
@@ -4663,30 +4886,64 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
               Operand(FC::kPropertyCallbackInfoOffset));
   }
 
-  DCHECK(!AreAliased(api_function_address, property_callback_info_arg, name_arg,
-                     callback, scratch));
-
 #ifdef V8_ENABLE_DIRECT_HANDLE
   // name_arg = Local<Name>(name), name value was pushed to GC-ed stack space.
   // |name_arg| is already initialized above.
+
+  if (for_setter) {
+    // value_arg = Local<Value>(value), the value was passed to the builtin
+    // on GC-ed stack, load it from there.
+    __ LoadU64(value_arg, MemOperand(fp, FC::kValueOffset));
+  }
 #else
   // name_arg = Local<Name>(&name), which is &args_array[kPropertyKeyIndex].
   static_assert(PCA::kPropertyKeyIndex == 0);
   __ mov(name_arg, property_callback_info_arg);
+
+  if (for_setter) {
+    // value_arg = Local<Value>(&value), which is &args_[kValueIndex].
+    static_assert(PCA::kValueIndex != 0);
+    __ AddS64(value_arg, property_callback_info_arg,
+              Operand(PCA::kValueIndex * kSystemPointerSize));
+  }
 #endif
 
-  ExternalReference thunk_ref = ER::invoke_accessor_getter_callback();
+  __ RecordComment("Load api_function_address");
+  Register api_function_address = callback;
+
+  ExternalReference thunk_ref;
   Register no_thunk_arg = no_reg;
 
+  if (for_interceptor) {
+    if (for_setter) {
+      thunk_ref = ER::invoke_named_interceptor_setter_callback();
+      __ LoadU64(api_function_address,
+                 FieldMemOperand(callback, InterceptorInfo::kSetterOffset));
+    } else {
+      thunk_ref = ER::invoke_named_interceptor_getter_callback();
+      __ LoadU64(api_function_address,
+                 FieldMemOperand(callback, InterceptorInfo::kGetterOffset));
+    }
+  } else {
+    DCHECK(!for_setter);
+    thunk_ref = ER::invoke_accessor_getter_callback();
+    __ LoadU64(api_function_address,
+               FieldMemOperand(callback, AccessorInfo::kGetterOffset));
+  }
+  callback = no_reg;
+
   MemOperand return_value_operand = MemOperand(fp, FC::kReturnValueOffset);
-  static constexpr int kSlotsToDropOnReturn =
-      FC::kPropertyCallbackInfoGetterApiArgsLength;
+  const int kSlotsToDropOnReturn =
+      for_setter ? FC::kPropertyCallbackInfoSetterApiArgsLength
+                 : FC::kPropertyCallbackInfoGetterApiArgsLength;
   MemOperand* const kUseStackSpaceConstant = nullptr;
 
   const bool with_profiling = true;
+  const bool handle_interceptor_result = for_interceptor;
   CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
                            thunk_ref, no_thunk_arg, kSlotsToDropOnReturn,
-                           kUseStackSpaceConstant, return_value_operand);
+                           kUseStackSpaceConstant, return_value_operand,
+                           handle_interceptor_result);
 }
 
 void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {

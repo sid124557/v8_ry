@@ -138,6 +138,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Assert(Condition cc, AbortReason reason, Register rs,
               Operand rt) NOOP_UNLESS_DEBUG_CODE;
 
+  // Abort execution if argument is not a Map, enabled via --debug-code.
+  void AssertMap(Register object) NOOP_UNLESS_DEBUG_CODE;
+
   void AssertJSAny(Register object, Register map_tmp, Register tmp,
                    AbortReason abort_reason) NOOP_UNLESS_DEBUG_CODE;
 
@@ -859,6 +862,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef);
 
+  void LoadFeedbackCell(Register dst, Register closure);
+  void LoadFeedbackVectorFromCell(Register dst, Register feedback_cell,
+                                  Register scratch, Label* fbv_undef);
+
   void LoadInterpreterDataBytecodeArray(Register destination,
                                         Register interpreter_data);
   void LoadInterpreterDataInterpreterTrampoline(Register destination,
@@ -1404,7 +1411,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ExternalReference thunk_ref, Register thunk_arg,
                               int slots_to_drop_on_return,
                               MemOperand* argc_operand,
-                              MemOperand return_value_operand);
+                              MemOperand return_value_operand,
+                              bool handle_interceptor_result);
 
 }  // namespace internal
 }  // namespace v8

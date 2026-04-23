@@ -10,7 +10,7 @@
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/wasm-compiler-definitions.h"
 #include "src/objects/string.h"
-#include "src/wasm/object-access.h"
+#include "src/sandbox/indirect-pointer-tag.h"
 #include "src/wasm/wasm-objects.h"
 
 namespace v8::internal::compiler {
@@ -206,11 +206,11 @@ Node* WasmGraphAssembler::BuildDecodeSandboxedExternalPointer(
         Load(MachineType::Pointer(), isolate_root,
              IsolateData::shared_external_pointer_table_offset());
     table = Load(MachineType::Pointer(), table_address,
-                 Internals::kExternalPointerTableBasePointerOffset);
+                 Internals::kExternalEntityTableBasePointerOffset);
   } else {
     table = Load(MachineType::Pointer(), isolate_root,
                  IsolateData::external_pointer_table_offset() +
-                     Internals::kExternalPointerTableBasePointerOffset);
+                     Internals::kExternalEntityTableBasePointerOffset);
   }
 
   // We don't expect to see empty fields here. If this is ever needed, consider
@@ -229,6 +229,7 @@ Node* WasmGraphAssembler::BuildDecodeSandboxedExternalPointer(
     auto ok = MakeLabel();
     GotoIf(Word32Equal(actual_tag, expected_tag), &ok, BranchHint::kTrue);
     RuntimeAbort(AbortReason::kExternalPointerTagMismatch);
+    Goto(&ok);  // Unreachable, but needed for graph coherency.
     Bind(&ok);
     return pointer;
   } else {
@@ -241,19 +242,46 @@ Node* WasmGraphAssembler::BuildDecodeSandboxedExternalPointer(
 #endif  // V8_ENABLE_SANDBOX
 }
 
-Node* WasmGraphAssembler::BuildDecodeTrustedPointer(Node* handle,
-                                                    IndirectPointerTag tag) {
+Node* WasmGraphAssembler::BuildDecodeTrustedPointer(
+    Node* handle, IndirectPointerTagRange tag_range) {
 #if V8_ENABLE_SANDBOX
   Node* index = Word32Shr(handle, Int32Constant(kTrustedPointerHandleShift));
   Node* offset = ChangeUint32ToUint64(
       Word32Shl(index, Int32Constant(kTrustedPointerTableEntrySizeLog2)));
   Node* table = Load(MachineType::Pointer(), LoadRootRegister(),
                      IsolateData::trusted_pointer_table_offset() +
-                         Internals::kTrustedPointerTableBasePointerOffset);
+                         Internals::kExternalEntityTableBasePointerOffset);
   Node* decoded_ptr = Load(MachineType::Pointer(), table, offset);
-  // Untag the pointer and remove the marking bit in one operation.
-  decoded_ptr = WordAnd(decoded_ptr,
-                        IntPtrConstant(~(tag | kTrustedPointerTableMarkBit)));
+
+  if (IsFastIndirectPointerTagRange(tag_range)) {
+    uint64_t mask = ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+    decoded_ptr = WordAnd(decoded_ptr, IntPtrConstant(mask));
+  } else {
+    Node* tag =
+        WordShr(decoded_ptr, IntPtrConstant(kTrustedPointerTableTagShift));
+
+    auto ok = MakeLabel();
+    if (tag_range.Size() == 1) {
+      // The common and simple case: we expect exactly one tag.
+      Node* expected_tag = IntPtrConstant(tag_range.first);
+      GotoIf(WordEqual(tag, expected_tag), &ok, BranchHint::kTrue);
+      RuntimeAbort(AbortReason::kIndirectPointerTagMismatch);
+      Goto(&ok);  // Unreachable, but needed for graph coherency.
+    } else {
+      // Range check.
+      Node* diff = IntPtrSub(tag, IntPtrConstant(tag_range.first));
+      GotoIf(Uint64LessThanOrEqual(
+                 diff, IntPtrConstant(tag_range.last - tag_range.first)),
+             &ok, BranchHint::kTrue);
+      RuntimeAbort(AbortReason::kIndirectPointerTagMismatch);
+      Goto(&ok);  // Unreachable, but needed for graph coherency.
+    }
+
+    Bind(&ok);
+    decoded_ptr =
+        WordAnd(decoded_ptr, IntPtrConstant(kTrustedPointerTablePayloadMask));
+  }
+
   // We have to change the type of the result value to Tagged, so if the value
   // gets spilled on the stack, it will get processed by the GC.
   decoded_ptr = BitcastWordToTagged(decoded_ptr);
@@ -269,11 +297,11 @@ Node* WasmGraphAssembler::BuildLoadExternalPointerFromObject(
 #ifdef V8_ENABLE_SANDBOX
   DCHECK(!tag_range.IsEmpty());
   Node* handle = LoadFromObject(MachineType::Uint32(), object,
-                                wasm::ObjectAccess::ToTagged(field_offset));
+                                field_offset - kHeapObjectTag);
   return BuildDecodeSandboxedExternalPointer(handle, tag_range, isolate_root);
 #else
   return LoadFromObject(MachineType::Pointer(), object,
-                        wasm::ObjectAccess::ToTagged(field_offset));
+                        field_offset - kHeapObjectTag);
 #endif  // V8_ENABLE_SANDBOX
 }
 
@@ -309,14 +337,13 @@ void WasmGraphAssembler::StoreMap(Node* heap_object, Node* map) {
 }
 
 Node* WasmGraphAssembler::LoadInstanceType(Node* map) {
-  return LoadImmutableFromObject(
-      MachineType::Uint16(), map,
-      wasm::ObjectAccess::ToTagged(Map::kInstanceTypeOffset));
+  return LoadImmutableFromObject(MachineType::Uint16(), map,
+                                 Map::kInstanceTypeOffset - kHeapObjectTag);
 }
 Node* WasmGraphAssembler::LoadWasmTypeInfo(Node* map) {
   int offset = Map::kConstructorOrBackPointerOrNativeContextOffset;
   return LoadImmutableFromObject(MachineType::TaggedPointer(), map,
-                                 wasm::ObjectAccess::ToTagged(offset));
+                                 offset - kHeapObjectTag);
 }
 
 // FixedArrays.
@@ -324,53 +351,54 @@ Node* WasmGraphAssembler::LoadWasmTypeInfo(Node* map) {
 Node* WasmGraphAssembler::LoadFixedArrayLengthAsSmi(Node* fixed_array) {
   return LoadImmutableFromObject(
       MachineType::TaggedSigned(), fixed_array,
-      wasm::ObjectAccess::ToTagged(offsetof(FixedArray, length_)));
+      offsetof(FixedArray, length_) - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::LoadFixedArrayElement(Node* fixed_array,
                                                 Node* index_intptr,
                                                 MachineType type) {
   DCHECK(IsSubtype(type.representation(), MachineRepresentation::kTagged));
-  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            OFFSET_OF_DATA_START(FixedArray))));
+  Node* offset =
+      IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+             IntPtrConstant(OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag));
   return LoadFromObject(type, fixed_array, offset);
 }
 
 Node* WasmGraphAssembler::LoadWeakFixedArrayElement(Node* fixed_array,
                                                     Node* index_intptr) {
-  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            OFFSET_OF_DATA_START(WeakFixedArray))));
+  Node* offset = IntAdd(
+      IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+      IntPtrConstant(OFFSET_OF_DATA_START(WeakFixedArray) - kHeapObjectTag));
   return LoadFromObject(MachineType::AnyTagged(), fixed_array, offset);
 }
 
 Node* WasmGraphAssembler::LoadImmutableFixedArrayElement(Node* fixed_array,
                                                          Node* index_intptr,
                                                          MachineType type) {
-  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            OFFSET_OF_DATA_START(FixedArray))));
+  Node* offset =
+      IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+             IntPtrConstant(OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag));
   return LoadImmutableFromObject(type, fixed_array, offset);
 }
 
 Node* WasmGraphAssembler::LoadFixedArrayElement(Node* array, int index,
                                                 MachineType type) {
-  return LoadFromObject(
-      type, array, wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(index));
+  return LoadFromObject(type, array,
+                        FixedArray::OffsetOfElementAt(index) - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::LoadProtectedFixedArrayElement(Node* array,
                                                          int index) {
   return LoadProtectedPointerFromObject(
-      array, wasm::ObjectAccess::ElementOffsetInProtectedFixedArray(index));
+      array, ProtectedFixedArray::OffsetOfElementAt(index) - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::LoadProtectedFixedArrayElement(Node* array,
                                                          Node* index_intptr) {
-  Node* offset = IntAdd(WordShl(index_intptr, IntPtrConstant(kTaggedSizeLog2)),
-                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            OFFSET_OF_DATA_START(ProtectedFixedArray))));
+  Node* offset =
+      IntAdd(WordShl(index_intptr, IntPtrConstant(kTaggedSizeLog2)),
+             IntPtrConstant(OFFSET_OF_DATA_START(ProtectedFixedArray) -
+                            kHeapObjectTag));
   return LoadProtectedPointerFromObject(array, offset);
 }
 
@@ -378,14 +406,14 @@ Node* WasmGraphAssembler::LoadByteArrayElement(Node* byte_array,
                                                Node* index_intptr,
                                                MachineType type) {
   int element_size = ElementSizeInBytes(type.representation());
-  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(element_size)),
-                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            OFFSET_OF_DATA_START(ByteArray))));
+  Node* offset =
+      IntAdd(IntMul(index_intptr, IntPtrConstant(element_size)),
+             IntPtrConstant(OFFSET_OF_DATA_START(ByteArray) - kHeapObjectTag));
   return LoadFromObject(type, byte_array, offset);
 }
 
 Node* WasmGraphAssembler::LoadImmutableTrustedPointerFromObject(
-    Node* object, int field_offset, IndirectPointerTag tag) {
+    Node* object, int field_offset, IndirectPointerTagRange tag) {
   Node* offset = IntPtrConstant(field_offset);
 #ifdef V8_ENABLE_SANDBOX
   Node* handle = LoadImmutableFromObject(MachineType::Uint32(), object, offset);
@@ -395,9 +423,8 @@ Node* WasmGraphAssembler::LoadImmutableTrustedPointerFromObject(
 #endif
 }
 
-Node* WasmGraphAssembler::LoadTrustedPointerFromObject(Node* object,
-                                                       int field_offset,
-                                                       IndirectPointerTag tag) {
+Node* WasmGraphAssembler::LoadTrustedPointerFromObject(
+    Node* object, int field_offset, IndirectPointerTagRange tag) {
   Node* offset = IntPtrConstant(field_offset);
 #ifdef V8_ENABLE_SANDBOX
   Node* handle = LoadFromObject(MachineType::Uint32(), object, offset);
@@ -409,7 +436,7 @@ Node* WasmGraphAssembler::LoadTrustedPointerFromObject(Node* object,
 
 std::pair<Node*, Node*>
 WasmGraphAssembler::LoadTrustedPointerFromObjectTrapOnNull(
-    Node* object, int field_offset, IndirectPointerTag tag) {
+    Node* object, int field_offset, IndirectPointerTagRange tag) {
   Node* offset = IntPtrConstant(field_offset);
 #ifdef V8_ENABLE_SANDBOX
   Node* handle = LoadTrapOnNull(MachineType::Uint32(), object, offset);
@@ -423,9 +450,9 @@ WasmGraphAssembler::LoadTrustedPointerFromObjectTrapOnNull(
 Node* WasmGraphAssembler::StoreFixedArrayElement(Node* array, int index,
                                                  Node* value,
                                                  ObjectAccess access) {
-  return StoreToObject(
-      access, array, wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(index),
-      value);
+  return StoreToObject(access, array,
+                       FixedArray::OffsetOfElementAt(index) - kHeapObjectTag,
+                       value);
 }
 
 // Functions, SharedFunctionInfos, FunctionData.
@@ -433,51 +460,40 @@ Node* WasmGraphAssembler::StoreFixedArrayElement(Node* array, int index,
 Node* WasmGraphAssembler::LoadSharedFunctionInfo(Node* js_function) {
   return LoadImmutableFromObject(
       MachineType::TaggedPointer(), js_function,
-      wasm::ObjectAccess::SharedFunctionInfoOffsetInTaggedJSFunction());
+      JSFunction::kSharedFunctionInfoOffset - kHeapObjectTag);
 }
 Node* WasmGraphAssembler::LoadContextNoCellFromJSFunction(Node* js_function) {
   return LoadFromObject(MachineType::TaggedPointer(), js_function,
-                        wasm::ObjectAccess::ContextOffsetInTaggedJSFunction());
+                        JSFunction::kContextOffset - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::LoadFunctionDataFromJSFunction(Node* js_function) {
   Node* shared = LoadSharedFunctionInfo(js_function);
   return LoadImmutableTrustedPointerFromObject(
-      shared,
-      wasm::ObjectAccess::ToTagged(
-          SharedFunctionInfo::kTrustedFunctionDataOffset),
-      kWasmFunctionDataIndirectPointerTag);
+      shared, SharedFunctionInfo::kTrustedFunctionDataOffset - kHeapObjectTag,
+      kWasmExportedFunctionDataIndirectPointerTag);
 }
 
-Node* WasmGraphAssembler::LoadExportedFunctionIndexAsSmi(
-    Node* exported_function_data) {
-  return LoadImmutableFromObject(
-      MachineType::TaggedSigned(), exported_function_data,
-      wasm::ObjectAccess::ToTagged(
-          WasmExportedFunctionData::kFunctionIndexOffset));
-}
 Node* WasmGraphAssembler::LoadExportedFunctionInstanceData(
     Node* exported_function_data) {
   return LoadImmutableProtectedPointerFromObject(
       exported_function_data,
-      wasm::ObjectAccess::ToTagged(
-          WasmExportedFunctionData::kProtectedInstanceDataOffset));
+      WasmExportedFunctionData::kProtectedInstanceDataOffset - kHeapObjectTag);
 }
 
 // JavaScript objects.
 
 Node* WasmGraphAssembler::LoadJSArrayElements(Node* js_array) {
-  return LoadFromObject(
-      MachineType::AnyTagged(), js_array,
-      wasm::ObjectAccess::ToTagged(JSObject::kElementsOffset));
+  return LoadFromObject(MachineType::AnyTagged(), js_array,
+                        JSObject::kElementsOffset - kHeapObjectTag);
 }
 
 // WasmGC objects.
 
 Node* WasmGraphAssembler::FieldOffset(const wasm::StructType* type,
                                       uint32_t field_index) {
-  return IntPtrConstant(wasm::ObjectAccess::ToTagged(
-      WasmStruct::kHeaderSize + type->field_offset(field_index)));
+  return IntPtrConstant(WasmStruct::kHeaderSize +
+                        type->field_offset(field_index) - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::WasmArrayElementOffset(Node* index,
@@ -485,7 +501,7 @@ Node* WasmGraphAssembler::WasmArrayElementOffset(Node* index,
   Node* index_intptr =
       mcgraph()->machine()->Is64() ? ChangeInt32ToInt64(index) : index;
   return IntAdd(
-      IntPtrConstant(wasm::ObjectAccess::ToTagged(WasmArray::kHeaderSize)),
+      IntPtrConstant(WasmArray::kHeaderSize - kHeapObjectTag),
       IntMul(index_intptr, IntPtrConstant(element_type.value_kind_size())));
 }
 
@@ -595,7 +611,7 @@ void WasmGraphAssembler::ArrayInitializeLength(Node* array, Node* length) {
 Node* WasmGraphAssembler::LoadStringLength(Node* string) {
   return LoadImmutableFromObject(
       MachineType::Int32(), string,
-      wasm::ObjectAccess::ToTagged(AccessBuilder::ForStringLength().offset));
+      AccessBuilder::ForStringLength().offset - kHeapObjectTag);
 }
 
 Node* WasmGraphAssembler::StringAsWtf16(Node* string) {
@@ -611,8 +627,7 @@ Node* WasmGraphAssembler::StringPrepareForGetCodeunit(Node* string) {
 Node* WasmGraphAssembler::LoadTrustedDataFromInstanceObject(
     Node* instance_object) {
   return LoadImmutableTrustedPointerFromObject(
-      instance_object,
-      wasm::ObjectAccess::ToTagged(WasmInstanceObject::kTrustedDataOffset),
+      instance_object, WasmInstanceObject::kTrustedDataOffset - kHeapObjectTag,
       kWasmTrustedInstanceDataIndirectPointerTag);
 }
 
@@ -623,6 +638,20 @@ Node* WasmGraphAssembler::HasInstanceType(Node* heap_object,
   Node* map = LoadMap(heap_object);
   Node* instance_type = LoadInstanceType(map);
   return Word32Equal(instance_type, Int32Constant(type));
+}
+
+Node* WasmGraphAssembler::HasInstanceTypeInRange(Node* heap_object,
+                                                 InstanceType lower_limit,
+                                                 InstanceType higher_limit) {
+  DCHECK_LT(lower_limit, higher_limit);
+  Node* map = LoadMap(heap_object);
+  Node* instance_type = LoadInstanceType(map);
+  if (lower_limit == 0) {
+    return Uint32LessThanOrEqual(instance_type, Int32Constant(higher_limit));
+  }
+  return Uint32LessThanOrEqual(
+      Int32Sub(instance_type, Int32Constant(lower_limit)),
+      Int32Constant(higher_limit - lower_limit));
 }
 
 }  // namespace v8::internal::compiler

@@ -41,6 +41,7 @@ int64_t CapRelativeIndex(double relative, int64_t minimum, int64_t maximum) {
 
 }  // namespace
 
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.copywithin
 BUILTIN(TypedArrayPrototypeCopyWithin) {
   HandleScope scope(isolate);
 
@@ -122,6 +123,11 @@ BUILTIN(TypedArrayPrototypeCopyWithin) {
   DCHECK_GE(len - count, 0);
 
   size_t element_size = array->element_size();
+  // To prevent `to` and `from` making it out of the guard region by changing
+  // element size after capping, it suffices to check that the current element
+  // size using the original length is still within the max byte length.
+  // As, both `to` and `from` were already capped based on the original length.
+  SBXCHECK_LE(element_size * len, ArrayBuffer::kMaxByteLength);
   to = to * element_size;
   from = from * element_size;
   count = count * element_size;
@@ -137,7 +143,7 @@ BUILTIN(TypedArrayPrototypeCopyWithin) {
   return *array;
 }
 
-// ES#sec-%typedarray%.prototype.fill
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.fill
 BUILTIN(TypedArrayPrototypeFill) {
   HandleScope scope(isolate);
 
@@ -237,6 +243,7 @@ BUILTIN(TypedArrayPrototypeFill) {
                                         isolate, array, obj_value, start, end));
 }
 
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.includes
 BUILTIN(TypedArrayPrototypeIncludes) {
   HandleScope scope(isolate);
 
@@ -268,6 +275,7 @@ BUILTIN(TypedArrayPrototypeIncludes) {
   return *isolate->factory()->ToBoolean(result.FromJust());
 }
 
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.indexof
 BUILTIN(TypedArrayPrototypeIndexOf) {
   HandleScope scope(isolate);
 
@@ -303,6 +311,7 @@ BUILTIN(TypedArrayPrototypeIndexOf) {
   return *isolate->factory()->NewNumberFromInt64(result.FromJust());
 }
 
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.lastindexof
 BUILTIN(TypedArrayPrototypeLastIndexOf) {
   HandleScope scope(isolate);
 
@@ -341,6 +350,7 @@ BUILTIN(TypedArrayPrototypeLastIndexOf) {
   return *isolate->factory()->NewNumberFromInt64(result.FromJust());
 }
 
+// https://tc39.es/ecma262/#sec-%typedarray%.prototype.reverse
 BUILTIN(TypedArrayPrototypeReverse) {
   HandleScope scope(isolate);
 

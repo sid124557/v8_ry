@@ -16,31 +16,33 @@
 #include "src/wasm/wasm-engine.h"
 
 namespace v8::internal::compiler::turboshaft {
-struct WasmBodyInliningResult {
-  enum class Type {
-    kSuccessWithValue,  // Inlining succeeded and produced a value.
-    kSuccessVoid,       // Inlining succeeded for a void function (no value).
-    kFailed             // Inlining failed, e.g., because of bailing out due to
-                        // unsupported operations in the inlinee.
-  };
 
-  Type type = Type::kFailed;
-  OptionalV<Any> value = OptionalV<Any>::Nullopt();
-
-  static WasmBodyInliningResult SuccessWithValue(V<Any> result_value) {
-    return {Type::kSuccessWithValue, result_value};
-  }
-  static WasmBodyInliningResult SuccessVoid() {
-    return {Type::kSuccessVoid, OptionalV<Any>::Nullopt()};
-  }
-  static WasmBodyInliningResult Failed() {
-    return {Type::kFailed, OptionalV<Any>::Nullopt()};
-  }
-  bool IsSuccess() const { return type != Type::kFailed; }
+struct WasmInlinedFunctionData {
+  wasm::NativeModule* native_module = nullptr;
+  uint32_t function_index = 0;
+  V<FrameState> js_caller_frame_state;
+  int inlining_id = 0;
 };
+
+struct WasmBodyInliningResult {
+  bool success = false;
+  OptionalV<Any> result = OptionalV<Any>::Nullopt();
+
+  static WasmBodyInliningResult Failed() { return {}; }
+};
+
 }  // namespace v8::internal::compiler::turboshaft
 
 namespace v8::internal::wasm {
+
+enum CWasmEntryParameters {
+  kCodeEntry,
+  kObjectRef,
+  kArgumentsBuffer,
+  kCEntryFp,
+  // marker:
+  kNumParameters
+};
 
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
@@ -82,15 +84,11 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
  public:
   using WasmGraphBuilderBase<Assembler>::Asm;
 
-  struct InlinedFunctionData {
-    NativeModule* native_module = nullptr;
-    uint32_t function_index = 0;
-  };
-
   WasmWrapperTSGraphBuilder(
       Zone* zone, Assembler& assembler, const CanonicalSig* sig,
       bool is_inlining_into_js,
-      std::optional<InlinedFunctionData> inlined_function_data = {})
+      std::optional<compiler::turboshaft::WasmInlinedFunctionData>
+          inlined_function_data = {})
       : WasmGraphBuilderBase<Assembler>(zone, assembler),
         is_inlining_into_js_(is_inlining_into_js),
         sig_(sig),
@@ -100,13 +98,6 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
   }
 
   void AbortIfNot(V<Word32> condition, AbortReason abort_reason);
-
-  V<Smi> LoadExportedFunctionIndexAsSmi(V<Object> exported_function_data) {
-    return __ Load(exported_function_data,
-                   LoadOp::Kind::TaggedBase().Immutable(),
-                   MemoryRepresentation::TaggedSigned(),
-                   WasmExportedFunctionData::kFunctionIndexOffset);
-  }
 
   V<Smi> BuildChangeInt32ToSmi(V<Word32> value) {
     // With pointer compression, only the lower 32 bits are used.
@@ -171,6 +162,7 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
   }
 
   V<Object> ToJS(OpIndex ret, CanonicalValueType type, V<Context> context);
+  V<Object> BuildToJSFunctionRef(V<WasmFuncRef> ret, V<Context> context);
 
   // Generate a call to the AllocateJSArray builtin.
   V<JSArray> BuildCallAllocateJSArray(V<Number> array_length,
@@ -191,25 +183,30 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
                                 OptionalV<FrameState> frame_state,
                                 compiler::LazyDeoptOnThrow lazy_deopt_on_throw);
 
-  OpIndex BuildCallAndReturn(V<Context> js_context, V<HeapObject> function_data,
-                             base::Vector<OpIndex> args, bool do_conversion,
-                             OptionalV<FrameState> frame_state,
-                             compiler::LazyDeoptOnThrow lazy_deopt_on_throw);
+  V<Object> ConvertWasmResultsToJS(base::Vector<OpIndex> returns,
+                                   V<Context> js_context);
 
-  V<Any> BuildJSToWasmWrapperImpl(
-      bool receiver_is_first_param, V<JSFunction> js_closure,
-      V<Context> js_context, base::Vector<const OpIndex> arguments,
-      OptionalV<FrameState> frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw);
+  // Overload for the inlined JS-to-Wasm wrapper.
+  // Returns the result of the Wasm function converted to a JS value.
+  V<Any> BuildJSToWasmWrapper(V<JSFunction> js_closure, V<Context> js_context,
+                              base::Vector<const OpIndex> arguments,
+                              OptionalV<FrameState> lazy_frame_state,
+                              compiler::LazyDeoptOnThrow lazy_deopt_on_throw,
+                              OptionalV<FrameState> caller_frame_state);
 
-  void BuildJSToWasmWrapper(bool receiver_is_first_param);
+  // Overload for the "regular" non-inlined compiled JS-to-Wasm wrapper.
+  void BuildJSToWasmWrapper();
 
   void BuildWasmToJSWrapper(ImportCallKind kind, int expected_arity,
                             Suspend suspend);
 
+  void BuildJSFastApiCallWrapper(DirectHandle<JSReceiver> callable);
+
   void BuildWasmStackEntryWrapper();
 
   void BuildCapiCallWrapper();
+
+  void BuildCWasmEntryWrapper();
 
   V<Word32> BuildSmiShiftBitsConstant() {
     return __ Word32Constant(kSmiShiftSize + kSmiTagSize);
@@ -270,11 +267,9 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
 
   V<Float32> BuildChangeTaggedToFloat32(
       OpIndex value, OpIndex context,
-      compiler::turboshaft::OptionalOpIndex frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw) {
+      OptionalV<FrameState> caller_frame_state) {
+    DCHECK_EQ(is_inlining_into_js_, caller_frame_state.valid());
     ScopedVar<Float32> result(this, OpIndex::Invalid());
-    // The builtin below does handle both the Smi and HeapNumber case as
-    // well, but it's good to have a fast path that doesn't require a call.
     IF (__ IsSmi(value)) {
       // TODO(dlehmann,wasm-runtime): If `ChangeInt32ToFloat32(x)` is exactly
       // equivalent to `TruncateFloat64ToFloat32(ChangeInt32ToFloat64(x))`, we
@@ -285,22 +280,29 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
     } ELSE {
       V<Map> map = LoadMap(value);
       // TODO(thibaudm): Handle map packing.
-      IF (LIKELY(__ TaggedEqual(
-              __ template LoadRoot<RootIndex::kHeapNumberMap>(), map))) {
+      V<Word32> is_heap_number = __ TaggedEqual(
+          __ template LoadRoot<RootIndex::kHeapNumberMap>(), map);
+      if (caller_frame_state.valid()) {
+        // When inlining JS-to-Wasm wrappers, eagerly deopt for values that
+        // are not Smi or HeapNumber to avoid calling conversion builtins
+        // that may throw (crbug.com/498709150).
+        __ DeoptimizeIfNot(is_heap_number, caller_frame_state.value(),
+                           DeoptimizeReason::kNotANumber,
+                           compiler::FeedbackSource{});
         result = __ TruncateFloat64ToFloat32(HeapNumberToFloat64(value));
-      } ELSE {
-        result = __ TruncateFloat64ToFloat32(
-            frame_state.valid()
-                ? CallBuiltin<WasmTaggedToFloat64Descriptor>(
-                      Builtin::kWasmTaggedToFloat64, frame_state.value(),
-                      Operator::kNoProperties, lazy_deopt_on_throw, value,
-                      context)
-                : CallBuiltin<WasmTaggedToFloat64Descriptor>(
-                      Builtin::kWasmTaggedToFloat64, Operator::kNoProperties,
-                      value, context));
-        // The source position here is needed for asm.js, see the comment on the
-        // source position of the call to JavaScript in the wasm-to-js wrapper.
-        __ output_graph().source_positions()[result] = SourcePosition(1);
+      } else {
+        IF (LIKELY(is_heap_number)) {
+          result = __ TruncateFloat64ToFloat32(HeapNumberToFloat64(value));
+        } ELSE {
+          result = __ TruncateFloat64ToFloat32(
+              CallBuiltin<WasmTaggedToFloat64Descriptor>(
+                  Builtin::kWasmTaggedToFloat64, Operator::kNoProperties, value,
+                  context));
+          // The source position here is needed for asm.js, see the comment on
+          // the source position of the call to JavaScript in the wasm-to-js
+          // wrapper.
+          __ output_graph().source_positions()[result] = SourcePosition(1);
+        }
       }
     }
     return result;
@@ -308,57 +310,70 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
 
   V<Float64> BuildChangeTaggedToFloat64(
       OpIndex value, OpIndex context,
-      compiler::turboshaft::OptionalOpIndex frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw) {
+      OptionalV<FrameState> caller_frame_state) {
+    DCHECK_EQ(is_inlining_into_js_, caller_frame_state.valid());
     ScopedVar<Float64> result(this, OpIndex::Invalid());
-    // The builtin below does handle both the Smi and HeapNumber case as
-    // well, but it's good to have a fast path that doesn't require a call.
     IF (__ IsSmi(value)) {
       result = __ ChangeInt32ToFloat64(__ UntagSmi(value));
     } ELSE {
       V<Map> map = LoadMap(value);
       // TODO(thibaudm): Handle map packing.
-      IF (LIKELY(__ TaggedEqual(
-              __ template LoadRoot<RootIndex::kHeapNumberMap>(), map))) {
+      V<Word32> is_heap_number = __ TaggedEqual(
+          __ template LoadRoot<RootIndex::kHeapNumberMap>(), map);
+      if (caller_frame_state.valid()) {
+        // When inlining JS-to-Wasm wrappers, eagerly deopt for values that
+        // are not Smi or HeapNumber to avoid calling conversion builtins
+        // that may throw (crbug.com/498709150).
+        __ DeoptimizeIfNot(is_heap_number, caller_frame_state.value(),
+                           DeoptimizeReason::kNotANumber,
+                           compiler::FeedbackSource{});
         result = HeapNumberToFloat64(value);
-      } ELSE {
-        result = frame_state.valid()
-                     ? CallBuiltin<WasmTaggedToFloat64Descriptor>(
-                           Builtin::kWasmTaggedToFloat64, frame_state.value(),
-                           Operator::kNoProperties, lazy_deopt_on_throw, value,
-                           context)
-                     : CallBuiltin<WasmTaggedToFloat64Descriptor>(
-                           Builtin::kWasmTaggedToFloat64,
-                           Operator::kNoProperties, value, context);
-        // The source position here is needed for asm.js, see the comment on the
-        // source position of the call to JavaScript in the wasm-to-js wrapper.
-        __ output_graph().source_positions()[result] = SourcePosition(1);
+      } else {
+        IF (LIKELY(is_heap_number)) {
+          result = HeapNumberToFloat64(value);
+        } ELSE {
+          result = CallBuiltin<WasmTaggedToFloat64Descriptor>(
+              Builtin::kWasmTaggedToFloat64, Operator::kNoProperties, value,
+              context);
+          // The source position here is needed for asm.js, see the comment on
+          // the source position of the call to JavaScript in the wasm-to-js
+          // wrapper.
+          __ output_graph().source_positions()[result] = SourcePosition(1);
+        }
       }
     }
     return result;
   }
 
-  OpIndex BuildChangeTaggedToInt32(
-      OpIndex value, OpIndex context,
-      compiler::turboshaft::OptionalOpIndex frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw) {
+  OpIndex BuildChangeTaggedToInt32(OpIndex value, OpIndex context,
+                                   OptionalV<FrameState> caller_frame_state) {
+    DCHECK_EQ(is_inlining_into_js_, caller_frame_state.valid());
     // We expect most integers at runtime to be Smis, so it is important for
     // wrapper performance that Smi conversion be inlined.
     ScopedVar<Word32> result(this, OpIndex::Invalid());
     IF (LIKELY(__ IsSmi(value))) {
       result = BuildChangeSmiToInt32(value);
     } ELSE {
-      result = frame_state.valid()
-                   ? CallBuiltin<WasmTaggedNonSmiToInt32Descriptor>(
-                         Builtin::kWasmTaggedNonSmiToInt32, frame_state.value(),
-                         Operator::kNoProperties, lazy_deopt_on_throw, value,
-                         context)
-                   : CallBuiltin<WasmTaggedNonSmiToInt32Descriptor>(
-                         Builtin::kWasmTaggedNonSmiToInt32,
-                         Operator::kNoProperties, value, context);
-      // The source position here is needed for asm.js, see the comment on the
-      // source position of the call to JavaScript in the wasm-to-js wrapper.
-      __ output_graph().source_positions()[result] = SourcePosition(1);
+      if (caller_frame_state.valid()) {
+        // When inlining JS-to-Wasm wrappers, eagerly deopt for values that
+        // are not Smi or HeapNumber to avoid calling conversion builtins
+        // that may throw (crbug.com/498709150).
+        V<Map> map = LoadMap(value);
+        __ DeoptimizeIfNot(
+            __ TaggedEqual(__ template LoadRoot<RootIndex::kHeapNumberMap>(),
+                           map),
+            caller_frame_state.value(), DeoptimizeReason::kNotANumber,
+            compiler::FeedbackSource{});
+        result = __ JSTruncateFloat64ToWord32(HeapNumberToFloat64(value));
+      } else {
+        result = CallBuiltin<WasmTaggedNonSmiToInt32Descriptor>(
+            Builtin::kWasmTaggedNonSmiToInt32, Operator::kNoProperties, value,
+            context);
+        // The source position here is needed for asm.js, see the comment on
+        // the source position of the call to JavaScript in the wasm-to-js
+        // wrapper.
+        __ output_graph().source_positions()[result] = SourcePosition(1);
+      }
     }
     return result;
   }
@@ -369,10 +384,23 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
         needs_frame_state);
   }
 
-  OpIndex BuildChangeBigIntToInt64(
-      OpIndex input, OpIndex context,
-      compiler::turboshaft::OptionalOpIndex frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw) {
+  OpIndex BuildChangeBigIntToInt64(OpIndex input, OpIndex context,
+                                   OptionalV<FrameState> caller_frame_state) {
+    DCHECK_EQ(is_inlining_into_js_, caller_frame_state.valid());
+    // When inlining JS-to-Wasm wrappers, eagerly deopt for values that are
+    // not BigInt to avoid calling ToBigInt, which could trigger user JS via
+    // valueOf/Symbol.toPrimitive (same rationale as for i32/f32/f64).
+    // Once the eager check passes, the BigIntToI64 builtin cannot throw:
+    // ToBigInt short-circuits for BigInt inputs, and BigIntToRawBytes does
+    // modular truncation (ToBigInt64) which never fails.
+    // (crbug.com/498709150, crbug.com/504030766).
+
+    if (caller_frame_state.valid()) {
+      __ DeoptimizeIfNot(
+          __ ObjectIsBigInt(V<Object>::Cast(input)), caller_frame_state.value(),
+          DeoptimizeReason::kNotABigInt, compiler::FeedbackSource{});
+    }
+
     OpIndex target;
     if (Is64()) {
       target = GetTargetForBuiltinCall(Builtin::kBigIntToI64);
@@ -383,49 +411,63 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
       target = GetTargetForBuiltinCall(Builtin::kBigIntToI32Pair);
     }
 
+    // When inlining (caller_frame_state valid), the eager deopt above
+    // guarantees the input is a BigInt, so the builtin cannot throw.
+    // No frame state or lazy deopt needed for the call.
+    // When not inlining, no frame state is available either.
     CallDescriptor* call_descriptor =
-        GetBigIntToI64CallDescriptor(frame_state.valid());
+        GetBigIntToI64CallDescriptor(/*needs_frame_state=*/false);
     const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
-        call_descriptor, compiler::CanThrow::kYes,
-        frame_state.valid() ? lazy_deopt_on_throw
-                            : compiler::LazyDeoptOnThrow::kNo,
-        __ graph_zone());
-    return frame_state.valid()
-               ? __ Call(target, frame_state.value(),
-                         base::VectorOf({input, context}), ts_call_descriptor)
-               : __ Call(target, {input, context}, ts_call_descriptor);
+        call_descriptor,
+        caller_frame_state.valid() ? compiler::CanThrow::kNo
+                                   : compiler::CanThrow::kYes,
+        compiler::LazyDeoptOnThrow::kNo, __ graph_zone());
+    OpIndex call_args[] = {input, context};
+    return __ Call(target, {}, base::VectorOf(call_args), ts_call_descriptor);
   }
 #endif
 
+  // Converts a JS value to the appropriate Wasm value.
+  // If {caller_frame_state} is valid (i.e., when inlining JS-to-Wasm wrappers):
+  // - For i32/f32/f64: Eager deopt guard ensures the value is Smi or
+  //   HeapNumber, making the conversion trivially inlineable without calling
+  //   any builtin. (crbug.com/493307329)
+  // - For BigInt->i64: Eager deopt guard ensures the value is a BigInt,
+  //   preventing ToBigInt from running user JS (valueOf). Once the guard
+  //   passes, the BigIntToI64 builtin cannot throw (ToBigInt short-circuits
+  //   for BigInt inputs, and the conversion is modular truncation).
+  //   (crbug.com/498709150)
   OpIndex FromJS(V<Object> input, OpIndex context, CanonicalValueType type,
-                 OptionalOpIndex frame_state = {},
-                 compiler::LazyDeoptOnThrow lazy_deopt_on_throw =
-                     compiler::LazyDeoptOnThrow::kNo) {
+                 OptionalV<FrameState> caller_frame_state = {}) {
     if (type.is_numeric()) {
       switch (type.numeric_kind()) {
         case NumericKind::kI32:
-          return BuildChangeTaggedToInt32(input, context, frame_state,
-                                          lazy_deopt_on_throw);
+          return BuildChangeTaggedToInt32(input, context, caller_frame_state);
         case NumericKind::kI64:
 #ifdef V8_ENABLE_TURBOFAN
           // i64 values can only come from BigInt.
-          return BuildChangeBigIntToInt64(input, context, frame_state,
-                                          lazy_deopt_on_throw);
+          return BuildChangeBigIntToInt64(input, context, caller_frame_state);
 #endif
         case NumericKind::kF32:
-          return BuildChangeTaggedToFloat32(input, context, frame_state,
-                                            lazy_deopt_on_throw);
+          return BuildChangeTaggedToFloat32(input, context, caller_frame_state);
         case NumericKind::kF64:
-          return BuildChangeTaggedToFloat64(input, context, frame_state,
-                                            lazy_deopt_on_throw);
+          return BuildChangeTaggedToFloat64(input, context, caller_frame_state);
         case NumericKind::kS128:
         case NumericKind::kI8:
         case NumericKind::kI16:
         case NumericKind::kF16:
+        case NumericKind::kWaitQueue:
           UNREACHABLE();
       }
     }
     if (type.is_abstract_ref()) {
+      // When inlining JS-to-Wasm wrappers, CanInlineJSToWasmCall() only
+      // allows nullable, non-shared externref, so none of the paths below
+      // that call runtime functions (which can throw) are reachable.
+      // If CanInlineJSToWasmCall() is ever extended to allow more reference
+      // types, the throwing paths would need a frame state to support
+      // lazy deopt on throw.
+      DCHECK_IMPLIES(caller_frame_state.valid(), type == wasm::kWasmExternRef);
       switch (type.generic_kind()) {
         // TODO(14034): Add more fast paths?
         case GenericKind::kExtern: {
@@ -437,7 +479,8 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
               __ Unreachable();
             }
           }
-          if (v8_flags.experimental_wasm_shared && type.is_shared()) {
+          if (v8_flags.experimental_wasm_shared &&
+              type.is_shared() == SharedFlag::kYes) {
             Label<Object> done(&Asm());
             IF (__ IsSmi(input)) {
               GOTO(done, input);
@@ -551,7 +594,7 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
     return pos;
   }
 
-  OpIndex LoadSharedFunctionInfo(V<Object> js_function) {
+  V<SharedFunctionInfo> LoadSharedFunctionInfo(V<Object> js_function) {
     return __ Load(js_function, LoadOp::Kind::TaggedBase(),
                    MemoryRepresentation::TaggedPointer(),
                    JSFunction::kSharedFunctionInfoOffset);
@@ -704,15 +747,10 @@ class WasmWrapperTSGraphBuilder : public WasmGraphBuilderBase<Assembler> {
   }
 
  private:
-  V<Object> InlineWasmFunctionInsideWrapper(
-      V<Context> js_context, V<WasmFunctionData> function_data,
-      base::Vector<OpIndex> inlined_args, bool do_conversion,
-      OptionalV<FrameState> frame_state,
-      compiler::LazyDeoptOnThrow lazy_deopt_on_throw);
-
   bool is_inlining_into_js_;
   const CanonicalSig* const sig_;
-  std::optional<InlinedFunctionData> inlined_function_data_;
+  std::optional<compiler::turboshaft::WasmInlinedFunctionData>
+      inlined_function_data_;
 };
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"

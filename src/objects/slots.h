@@ -18,6 +18,8 @@ namespace v8::internal {
 
 class Object;
 class ExposedTrustedObject;
+template <typename T, IndirectPointerTagRange kTagRange>
+class TrustedPointerMember;
 using TaggedBase = TaggedImpl<HeapObjectReferenceType::STRONG, Address>;
 
 template <typename Subclass, typename Data,
@@ -317,9 +319,16 @@ class ExternalPointerSlot
   ExternalPointerSlot(Address ptr, ExternalPointerTagRange tag_range)
       : SlotBase(ptr), tag_range_(tag_range) {}
 
-  template <ExternalPointerTag tag>
-  explicit ExternalPointerSlot(ExternalPointerMember<tag>* member)
-      : SlotBase(member->storage_address()), tag_range_(tag) {}
+  template <ExternalPointerTagRange kTagRange>
+  explicit ExternalPointerSlot(ExternalPointerMember<kTagRange>* member)
+      : SlotBase(member->storage_address()), tag_range_(kTagRange) {}
+
+  template <ExternalPointerTagRange kTagRange>
+  ExternalPointerSlot(ExternalPointerMember<kTagRange>* member,
+                      ExternalPointerTagRange tag_range)
+      : SlotBase(member->storage_address()), tag_range_(tag_range) {
+    DCHECK(kTagRange.Contains(tag_range));
+  }
 
   inline void init_lazily_initialized();
 
@@ -435,16 +444,27 @@ class IndirectPointerSlot
       : SlotBase(kNullAddress)
 #ifdef V8_ENABLE_SANDBOX
         ,
-        tag_(kIndirectPointerNullTag)
+        tag_range_()
 #endif
   {
   }
 
-  explicit IndirectPointerSlot(Address ptr, IndirectPointerTag tag)
+  explicit IndirectPointerSlot(Address ptr, IndirectPointerTagRange tag_range)
       : SlotBase(ptr)
 #ifdef V8_ENABLE_SANDBOX
         ,
-        tag_(tag)
+        tag_range_(tag_range)
+#endif
+  {
+  }
+
+  template <typename T, IndirectPointerTagRange kTagRange>
+  explicit IndirectPointerSlot(TrustedPointerMember<T, kTagRange>* member)
+#ifdef V8_ENABLE_SANDBOX
+      : SlotBase(member->storage_address()),
+        tag_range_(kTagRange)
+#else
+      : SlotBase(member->ptr_location())
 #endif
   {
   }
@@ -474,9 +494,11 @@ class IndirectPointerSlot
   inline void Release_StoreHandle(IndirectPointerHandle handle) const;
 
 #ifdef V8_ENABLE_SANDBOX
-  IndirectPointerTag tag() const { return tag_; }
+  IndirectPointerTagRange tag_range() const { return tag_range_; }
 #else
-  IndirectPointerTag tag() const { return kIndirectPointerNullTag; }
+  IndirectPointerTagRange tag_range() const {
+    return IndirectPointerTagRange();
+  }
 #endif
 
   // Whether this slot is empty, i.e. contains a null handle.
@@ -506,7 +528,7 @@ class IndirectPointerSlot
       IndirectPointerHandle handle) const;
 
   // The tag associated with this slot.
-  IndirectPointerTag tag_;
+  IndirectPointerTagRange tag_range_;
 #endif  // V8_ENABLE_SANDBOX
 };
 

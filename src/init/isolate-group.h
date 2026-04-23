@@ -28,10 +28,6 @@
 #include "src/heap/trusted-range.h"
 #endif  // V8_ENABLE_SANDBOX
 
-#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
-#include "src/sandbox/external-strings-cage.h"
-#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
-
 namespace v8 {
 
 namespace base {
@@ -51,6 +47,8 @@ class SandboxedArrayBufferAllocatorBase {
  public:
   virtual void* Allocate(size_t length) = 0;
   virtual void* AllocateUninitialized(size_t length) = 0;
+  // On allocation failure, triggers an OOM crash instead of returning nullptr.
+  virtual void* AllocateUninitializedOrCrash(size_t length) = 0;
   virtual void Free(void* ptr) = 0;
 };
 
@@ -75,6 +73,7 @@ class SandboxedArrayBufferAllocator final
 
   void* Allocate(size_t length) override;
   void* AllocateUninitialized(size_t length) override;
+  void* AllocateUninitializedOrCrash(size_t length) override;
   void Free(void* data) override;
 
   void TearDown();
@@ -111,6 +110,7 @@ class PABackedSandboxedArrayBufferAllocator
 
   void* Allocate(size_t length) override;
   void* AllocateUninitialized(size_t length) override;
+  void* AllocateUninitializedOrCrash(size_t length) override;
   void Free(void* data) override;
 
   void TearDown();
@@ -303,15 +303,7 @@ class V8_EXPORT_PRIVATE IsolateGroup final {
   }
 
   SandboxedArrayBufferAllocatorBase* GetSandboxedArrayBufferAllocator();
-
-#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
-  ExternalStringsCage* external_strings_cage() {
-    return &external_strings_cage_;
-  }
-#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 #endif  // V8_ENABLE_SANDBOX
-
-  JSDispatchTable* js_dispatch_table() { return &js_dispatch_table_; }
 
   void SetupReadOnlyHeap(Isolate* isolate,
                          SnapshotData* read_only_snapshot_data,
@@ -432,9 +424,6 @@ class V8_EXPORT_PRIVATE IsolateGroup final {
   CodePointerTable code_pointer_table_;
   BasePageTableEntry metadata_pointer_table_
       [MemoryChunkConstants::kMetadataPointerTableSize]{};
-#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
-  ExternalStringsCage external_strings_cage_;
-#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 #ifdef V8_ENABLE_PARTITION_ALLOC
   PABackedSandboxedArrayBufferAllocator backend_allocator_;
 #else
@@ -442,8 +431,6 @@ class V8_EXPORT_PRIVATE IsolateGroup final {
 #endif
   TrustedRange trusted_range_;
 #endif  // V8_ENABLE_SANDBOX
-
-  JSDispatchTable js_dispatch_table_;
 };
 
 }  // namespace internal

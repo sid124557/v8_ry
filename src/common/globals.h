@@ -14,6 +14,7 @@
 #include "include/cppgc/macros.h"
 #include "include/v8-internal.h"
 #include "src/base/atomic-utils.h"
+#include "src/base/bit-field.h"
 #include "src/base/build_config.h"
 #include "src/base/enum-set.h"
 #include "src/base/flags.h"
@@ -361,6 +362,34 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_EXPERIMENTAL_TSA_BUILTINS_BOOL false
 #endif
 
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+#define V8_EXPERIMENTAL_TQ_TO_TSA_BOOL true
+#else
+#define V8_EXPERIMENTAL_TQ_TO_TSA_BOOL false
+#endif
+
+#ifdef V8_ENABLE_EXPERIMENTAL_TQ_TO_TSA
+#ifndef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
+#error "tq-to-tsa is not supported without tsa builtins"
+#endif
+#define SELECT_TSA_LEVEL(NO_TSA_MACRO, TSA_MACRO, TQ_TO_TSA_MACRO, ...) \
+  EXPAND(TQ_TO_TSA_MACRO(__VA_ARGS__))
+#elif V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
+#define SELECT_TSA_LEVEL(NO_TSA_MACRO, TSA_MACRO, TQ_TO_TSA_MACRO, ...) \
+  EXPAND(TSA_MACRO(__VA_ARGS__))
+#else
+#define SELECT_TSA_LEVEL(NO_TSA_MACRO, TSA_MACRO, TQ_TO_TSA_MACRO, ...) \
+  EXPAND(NO_TSA_MACRO(__VA_ARGS__))
+#endif
+
+#ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
+// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
+#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(TSA_MACRO(__VA_ARGS__))
+#else
+// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
+#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(CSA_MACRO(__VA_ARGS__))
+#endif
+
 #define V8_STACK_ALLOCATED CPPGC_STACK_ALLOCATED
 
 // Superclass for classes only using static method functions.
@@ -424,15 +453,23 @@ constexpr int kElidedFrameSlots = 0;
 #endif
 
 constexpr int kDoubleSizeLog2 = 3;
-// The maximal length of the string representation for a double value
-// (e.g. "-2.2250738585072020E-308"). It is composed as follows:
+// The maximal length of the string representation for a double value.
+// 1) The max length for values in the scientific notation (e.g.
+// "-2.2250738585072020E-308"). is 24:
 // - 17 decimal digits, see base::kBase10MaximalLength (dtoa.h)
 // - 1 sign
 // - 1 decimal point
 // - 1 E or e
 // - 1 exponent sign
 // - 3 exponent
-constexpr int kMaxDoubleStringLength = 24;
+// 2) The max length for values in the decimal notation (e.g.,
+// "-0.0000012345678901234567") is 25:
+// - 1 sign
+// - 1 digit
+// - 1 decimal point
+// - 5 zeros
+// - 17 decimal digits
+constexpr int kMaxDoubleStringLength = 25;
 
 // Total wasm code space per engine (i.e. per process) is limited to make
 // certain attacks that rely on heap spraying harder.
@@ -542,6 +579,14 @@ using Tagged_t = Address;
 using AtomicTagged_t = base::AtomicWord;
 
 #endif  // V8_COMPRESS_POINTERS
+
+// The name used for virtual address space reservations backing the pointer
+// tables. This name is mostly useful for debugging/inspecting and should be
+// visible in e.g. /proc/$pid/maps if the system supports setting names on
+// virtual memory ranges (PR_SET_VMA_ANON_NAME on Linux).
+// TODO(saelo): It might be nicer to have one name per table type, e.g.
+// v8-external-pointer-table, v8-trusted-pointer-table, etc.
+static const char* kPointerTableAddressSpaceName = "v8-pointer-table";
 
 //
 // JavaScript Dispatch Table
@@ -889,6 +934,14 @@ constexpr int kUninitializedEmbeddedFeedback = 0;
 // The bytecode operand index for embedded feedback.
 constexpr int kEmbeddedFeedbackOperandIndex = 1;
 
+// These constants are internal duplicates for v8::Intercepted enum values.
+constexpr uint8_t kInterceptedNo = 1;
+constexpr uint8_t kInterceptedYes = 0;
+constexpr size_t kInterceptedSize = 4;
+// Invalid pointer value used for passing the "not intercepted" result from
+// CallNamedInterceptorXXXX/CallIndexedInterceptorXXX builtins to caller.
+constexpr uint32_t kNotInterceptedSentinel = kHeapObjectTag;
+
 // This constant is used as an undefined value when passing source positions.
 constexpr int kNoSourcePosition = -1;
 
@@ -1109,6 +1162,7 @@ class Debug;
 class DebugInfo;
 class Descriptor;
 class DescriptorArray;
+class StrongDescriptorArray;
 template <typename T>
 class DirectHandle;
 #ifdef V8_ENABLE_DIRECT_HANDLE
@@ -1161,8 +1215,6 @@ using MaybeIndirectHandle = MaybeHandle<T>;
 class MaybeObjectHandle;
 class MaybeObjectDirectHandle;
 using MaybeObjectIndirectHandle = MaybeObjectHandle;
-template <typename T>
-class MaybeWeak;
 class MutablePage;
 class MessageLocation;
 class ModuleScope;
@@ -1222,12 +1274,22 @@ class TheHole;
 template <typename... Ts>
 class Union;
 class Variable;
+template <typename T>
+class Weak;
 namespace maglev {
 class MaglevAssembler;
 }
 namespace compiler {
 class AccessBuilder;
 }
+
+// MaybeWeak<T> represents a reference to T that may be either a strong or weak.
+template <typename T>
+using MaybeWeak = Union<T, Weak<T>>;
+
+// Zero is a special Smi value.
+// TODO(leszeks): Add a proper Zero type.
+using Zero = Smi;
 
 // Number is either a Smi or a HeapNumber.
 using Number = Union<Smi, HeapNumber>;
@@ -1256,7 +1318,7 @@ using JSAnyOrSharedFunctionInfo =
 // be any other primitive value.
 using JSPrototype = Union<JSReceiver, Null>;
 
-using MaybeObject = MaybeWeak<Object>;
+using MaybeObject = Union<Smi, HeapObject, Weak<HeapObject>>;
 using HeapObjectReference = MaybeWeak<HeapObject>;
 
 using JSObjectOrUndefined = Union<JSObject, Undefined>;
@@ -1626,7 +1688,8 @@ inline size_t hash_value(AllocationType kind) {
 
 inline constexpr bool IsSharedAllocationType(AllocationType kind) {
   return kind == AllocationType::kSharedOld ||
-         kind == AllocationType::kSharedMap;
+         kind == AllocationType::kSharedMap ||
+         kind == AllocationType::kSharedTrusted;
 }
 
 enum class RecordYoungSlot : bool {
@@ -1658,6 +1721,14 @@ static constexpr GCEpoch kInitialGCEpoch = GCEpoch(0);
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
 enum class TypedArrayAccessMode { kRead, kWrite };
+inline std::ostream& operator<<(std::ostream& os, TypedArrayAccessMode mode) {
+  switch (mode) {
+    case TypedArrayAccessMode::kRead:
+      return os << "kRead";
+    case TypedArrayAccessMode::kWrite:
+      return os << "kWrite";
+  }
+}
 
 enum MinimumCapacity {
   USE_DEFAULT_MINIMUM_CAPACITY,
@@ -1774,6 +1845,8 @@ enum class InlineCacheState {
   POLYMORPHIC,
   // Many DOM receiver types have been seen for the same accessor.
   MEGADOM,
+  // Many receiver types have been seen with the same handler.
+  HOMOMORPHIC,
   // Many receiver types have been seen.
   MEGAMORPHIC,
   // A generic handler is installed and no extra typefeedback is recorded.
@@ -1797,6 +1870,8 @@ inline const char* InlineCacheState2String(InlineCacheState state) {
       return "RECOMPUTE_HANDLER";
     case InlineCacheState::POLYMORPHIC:
       return "POLYMORPHIC";
+    case InlineCacheState::HOMOMORPHIC:
+      return "HOMOMORPHIC";
     case InlineCacheState::MEGAMORPHIC:
       return "MEGAMORPHIC";
     case InlineCacheState::MEGADOM:
@@ -1816,6 +1891,8 @@ enum ShouldThrow {
   kThrowOnError = Internals::kThrowOnError,
 };
 
+enum class InterceptorKind { kNamed, kIndexed };
+
 // The result that might be returned by Setter/Definer/Deleter interceptor
 // callback when it doesn't throw an exception.
 enum class InterceptorResult {
@@ -1831,22 +1908,30 @@ enum class ThreadKind { kMain, kBackground };
 // platform headers and libraries
 union IeeeDoubleLittleEndianArchType {
   double d;
-  struct {
-    unsigned int man_low : 32;
-    unsigned int man_high : 20;
-    unsigned int exp : 11;
-    unsigned int sign : 1;
-  } bits;
+  uint64_t bits;
+  using ManLowField = base::BitField<uint32_t, 0, 32, uint64_t>;
+  using ManHighField = ManLowField::Next<uint32_t, 20>;
+  using ExpField = ManHighField::Next<uint32_t, 11>;
+  using SignField = ExpField::Next<uint32_t, 1>;
+
+  uint32_t man_low() const { return ManLowField::decode(bits); }
+  uint32_t man_high() const { return ManHighField::decode(bits); }
+  uint32_t exp() const { return ExpField::decode(bits); }
+  uint32_t sign() const { return SignField::decode(bits); }
 };
 
 union IeeeDoubleBigEndianArchType {
   double d;
-  struct {
-    unsigned int sign : 1;
-    unsigned int exp : 11;
-    unsigned int man_high : 20;
-    unsigned int man_low : 32;
-  } bits;
+  uint64_t bits;
+  using ManLowField = base::BitField<uint32_t, 0, 32, uint64_t>;
+  using ManHighField = ManLowField::Next<uint32_t, 20>;
+  using ExpField = ManHighField::Next<uint32_t, 11>;
+  using SignField = ExpField::Next<uint32_t, 1>;
+
+  uint32_t man_low() const { return ManLowField::decode(bits); }
+  uint32_t man_high() const { return ManHighField::decode(bits); }
+  uint32_t exp() const { return ExpField::decode(bits); }
+  uint32_t sign() const { return SignField::decode(bits); }
 };
 
 #if V8_TARGET_LITTLE_ENDIAN
@@ -1986,44 +2071,21 @@ inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
 // https://chromium-review.googlesource.com/c/v8/v8/+/3429210
 constexpr int kScopeInfoMaxInlinedLocalNamesSize = 75;
 
+// The first 4 scopes are top-level scopes. The order is used for range checks.
 enum ScopeType : uint8_t {
-  SCRIPT_SCOPE,        // The top-level scope for a script or a top-level eval.
-  REPL_MODE_SCOPE,     // The top-level scope for a repl-mode script.
+  // Start of top-level scopes.
+  SCRIPT_SCOPE,     // The top-level scope for a script or a top-level eval.
+  REPL_MODE_SCOPE,  // The top-level scope for a repl-mode script.
+  EVAL_SCOPE,       // The top-level scope for an eval source.
+  MODULE_SCOPE,     // The scope introduced by a module literal
+  // End of top-level scopes.
   CLASS_SCOPE,         // The scope introduced by a class.
-  EVAL_SCOPE,          // The top-level scope for an eval source.
   FUNCTION_SCOPE,      // The top-level scope for a function.
-  MODULE_SCOPE,        // The scope introduced by a module literal
   CATCH_SCOPE,         // The scope introduced by catch.
   BLOCK_SCOPE,         // The scope introduced by a new block.
   WITH_SCOPE,          // The scope introduced by with.
   SHADOW_REALM_SCOPE,  // Synthetic scope for ShadowRealm NativeContexts.
 };
-
-inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
-  switch (type) {
-    case ScopeType::EVAL_SCOPE:
-      return os << "EVAL_SCOPE";
-    case ScopeType::FUNCTION_SCOPE:
-      return os << "FUNCTION_SCOPE";
-    case ScopeType::MODULE_SCOPE:
-      return os << "MODULE_SCOPE";
-    case ScopeType::SCRIPT_SCOPE:
-      return os << "SCRIPT_SCOPE";
-    case ScopeType::CATCH_SCOPE:
-      return os << "CATCH_SCOPE";
-    case ScopeType::BLOCK_SCOPE:
-      return os << "BLOCK_SCOPE";
-    case ScopeType::CLASS_SCOPE:
-      return os << "CLASS_SCOPE";
-    case ScopeType::WITH_SCOPE:
-      return os << "WITH_SCOPE";
-    case ScopeType::SHADOW_REALM_SCOPE:
-      return os << "SHADOW_REALM_SCOPE";
-    case ScopeType::REPL_MODE_SCOPE:
-      return os << "REPL_MODE_SCOPE";
-  }
-  UNREACHABLE();
-}
 
 // AllocationSiteMode controls whether allocations are tracked by an allocation
 // site.
@@ -2072,28 +2134,29 @@ inline constexpr double HoleNan() {
 #endif  // V8_ENABLE_UNDEFINED_DOUBLE
 
 // ES6 section 20.1.2.6 Number.MAX_SAFE_INTEGER
-constexpr uint64_t kMaxSafeIntegerUint64 = 9007199254740991;  // 2^53-1
-static_assert(kMaxSafeIntegerUint64 == (uint64_t{1} << 53) - 1);
+constexpr uint64_t kMaxSafeIntegerUint64 = (uint64_t{1} << 53) - 1;  // 2^53-1
 constexpr double kMaxSafeInteger = static_cast<double>(kMaxSafeIntegerUint64);
 // ES6 section 21.1.2.8 Number.MIN_SAFE_INTEGER
 constexpr double kMinSafeInteger = -kMaxSafeInteger;
 
 constexpr double kMaxUInt32Double = double{kMaxUInt32};
 
-constexpr int64_t kMaxAdditiveSafeInteger = 4503599627370495;  // 2^52 - 1
-static_assert(kMaxAdditiveSafeInteger == (int64_t{1} << 52) - 1);
-constexpr int64_t kMinAdditiveSafeInteger = -4503599627370496;  // - 2^52
-static_assert(kMinAdditiveSafeInteger == -(int64_t{1} << 52));
-constexpr int kAdditiveSafeIntegerBitLength = 53;
-// Number of bits to shift left before addition to detect potential overflow.
-constexpr int kAdditiveSafeIntegerShift = 64 - kAdditiveSafeIntegerBitLength;
-
+constexpr int64_t kMaxAdditiveSafeInteger = (int64_t{1} << 52) - 1;  // 2^52 - 1
+constexpr int64_t kMinAdditiveSafeInteger =
+    -(int64_t{1} << 52) + 1;  // - (2^52 - 1)
 static_assert(kMaxAdditiveSafeInteger + kMaxAdditiveSafeInteger <=
               kMaxSafeInteger);
-// kMinAdditiveSafeInteger + kMinAdditiveSafeInteger would overflow the integer
-// safe addition.
-static_assert(kMinAdditiveSafeInteger + (kMinAdditiveSafeInteger + 1) >=
+static_assert(kMinAdditiveSafeInteger + kMinAdditiveSafeInteger >=
               kMinSafeInteger);
+
+constexpr int64_t kMaxAdditiveSafeIntegerFeedback =
+    (int64_t{1} << 51) - 1;  // 2^51 - 1
+constexpr int64_t kMinAdditiveSafeIntegerFeedback =
+    -(int64_t{1} << 51);  // - 2^51
+constexpr int kAdditiveSafeIntegerFeedbackBitLength = 52;
+// Number of bits to shift left before addition to detect potential overflow.
+constexpr int kAdditiveSafeIntegerFeedbackShift =
+    64 - kAdditiveSafeIntegerFeedbackBitLength;
 
 // The order of this enum has to be kept in sync with the predicates below.
 enum class VariableMode : uint8_t {
@@ -2248,6 +2311,10 @@ inline bool IsLexicalVariableMode(VariableMode mode) {
   static_assert(static_cast<uint8_t>(VariableMode::kLet) ==
                 0);  // Implies that mode >= VariableMode::kLet.
   return mode <= VariableMode::kLastLexicalVariableMode;
+}
+
+inline bool IsResourceManagedVariableMode(VariableMode mode) {
+  return mode == VariableMode::kUsing || mode == VariableMode::kAwaitUsing;
 }
 
 enum VariableLocation : uint8_t {
@@ -2432,19 +2499,17 @@ class CompareOperationFeedback {
 };
 
 class TypeOfFeedback {
-  enum {
-    kNumberFlag = 1,
-    kFunctionFlag = 1 << 1,
-    kStringFlag = 1 << 2,
-  };
 
  public:
   enum Result {
     kNone = 0,
-    kNumber = kNumberFlag,
-    kFunction = kFunctionFlag,
-    kString = kStringFlag,
-    kAny = kNumberFlag | kFunctionFlag | kStringFlag,
+    kSmi = 1,
+    kHeapNumber = 1 << 1,
+    kFunction = 1 << 2,
+    kString = 1 << 3,
+
+    kNumber = kHeapNumber | kSmi,
+    kAny = kSmi | kHeapNumber | kFunction | kString,
   };
 };
 
@@ -2617,19 +2682,29 @@ enum class CachedTieringDecision : int32_t {
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
 #define IF_SPARKPLUG_PLUS(V, ...) EXPAND(V(__VA_ARGS__))
 
-#define TYPED_STRICTEQUAL_STUB_LIST(V) \
-  V(None)                              \
-  V(SignedSmall)                       \
-  V(Number)                            \
-  V(InternalizedString)                \
-  V(String)                            \
-  V(Symbol)                            \
-  V(Receiver)                          \
+#define TYPED_EQUAL_STUB_LIST(V) \
+  V(None)                        \
+  V(SignedSmall)                 \
+  V(Number)                      \
+  V(InternalizedString)          \
+  V(String)                      \
+  V(Receiver)                    \
   V(Any)
+
+#define TYPED_STRICTEQUAL_STUB_LIST(V) \
+  TYPED_EQUAL_STUB_LIST(V)             \
+  V(Symbol)
+
+#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V) \
+  V(None)                                     \
+  V(SignedSmall)                              \
+  V(Number)
 #else
 #define IF_SPARKPLUG_PLUS(V, ...)
 
 #define TYPED_STRICTEQUAL_STUB_LIST(V)
+#define TYPED_EQUAL_STUB_LIST(V)
+#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V)
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
 enum class SpeculationMode {
@@ -2674,6 +2749,12 @@ inline std::ostream& operator<<(std::ostream& os, ConcurrencyMode mode) {
   return os << ToString(mode);
 }
 
+enum class SharedFlag : bool { kNo = false, kYes = true };
+
+inline std::ostream& operator<<(std::ostream& os, SharedFlag shared) {
+  return os << (shared == SharedFlag::kYes ? "shared" : "not shared");
+}
+
 // An architecture independent representation of the sets of registers available
 // for instruction creation.
 enum class AliasingKind {
@@ -2705,6 +2786,8 @@ enum class AliasingKind {
   V(TrapArrayOutOfBounds)          \
   V(TrapArrayTooLarge)             \
   V(TrapResume)                    \
+  V(TrapSuspend)                   \
+  V(TrapSwitch)                    \
   V(TrapStringOffsetOutOfBounds)
 
 enum class KeyedAccessLoadMode : uint8_t {
@@ -2896,7 +2979,7 @@ class int31_t {
 
 enum PropertiesEnumerationMode {
   // String and then Symbol properties according to the spec
-  // ES#sec-object.assign
+  // https://tc39.es/ecma262/#sec-object.assign
   kEnumerationOrder,
   // Order of property addition
   kPropertyAdditionOrder,
@@ -2913,8 +2996,29 @@ enum class StringTransitionStrategy {
 
 class WasmCodePointer {
  public:
+  static constexpr uint32_t kWasmCodePointerTableEntrySize =
+      kSystemPointerSize + (V8_ENABLE_SANDBOX_BOOL ? kUInt64Size : 0);
+#ifdef V8_TARGET_ARCH_64_BIT
+  static constexpr uint32_t kIndexSpaceSize =
+      kCodePointerTableReservationSize / kWasmCodePointerTableEntrySize;
+#else   // V8_TARGET_ARCH_64_BIT
+  static constexpr uint32_t kIndexSpaceSize =
+      (kMaxUInt32 / kWasmCodePointerTableEntrySize) + 1;
+#endif  // V8_TARGET_ARCH_64_BIT
+
   WasmCodePointer() = default;
-  explicit constexpr WasmCodePointer(uint32_t value) : value_(value) {}
+  explicit constexpr WasmCodePointer(uint32_t value) : value_(value) {
+    // Most `WasmCodePointer`s are stored in trusted space (in
+    // `WasmInternalFunction` and `WasmDispatchTable`). A few rare pointers are
+    // stored in untrusted space, like feedback data. We need to be careful
+    // there to either validate the pointer before use or otherwise making sure
+    // that a manipulated code pointer does not cause a sandbox escape.
+    // This DCHECK does not protect against anything but catches such cases
+    // earlier.
+    // Calls via WasmCodePointer to already mask the value to avoid OOB reads.
+    DCHECK(value == static_cast<uint32_t>(-1)  // the "invalid" handle
+           || value < kIndexSpaceSize);
+  }
 
   uint32_t value() const { return value_; }
 
@@ -2938,7 +3042,9 @@ constexpr uint64_t kInvalidWasmSignatureHash = ~uint64_t{0};
 
 enum class CallJumpMode { kCall, kTailCall };
 
-constexpr int kPreallocatedNumberStringTableSize = 100;
+constexpr uint32_t kPreallocatedNumberStringTableSize = 100;
+
+enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 
 enum class SilenceNanMode {
   kSilenceUndefined,

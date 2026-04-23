@@ -43,7 +43,6 @@ class Signature;
 class WasmFunctionData;
 class WasmCapiFunctionData;
 class WasmExportedFunctionData;
-class WasmJSFunctionData;
 class WasmResumeData;
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -416,17 +415,17 @@ class SharedFunctionInfo
   //  - a UncompiledDataWithPreparseData for lazy compilation
   //    [HasUncompiledDataWithPreparseData()]
   //  - a WasmExportedFunctionData for Wasm [HasWasmExportedFunctionData()]
-  //  - a WasmJSFunctionData for functions created with WebAssembly.Function
   //  - a WasmCapiFunctionData for Wasm C-API functions
   //  - a WasmResumeData for JSPI Wasm functions
   //
   // If the (expected) type of data is known, prefer to use the specialized
   // accessors (e.g. bytecode_array(), uncompiled_data(), etc.).
-  inline Tagged<Object> GetTrustedData(IsolateForSandbox isolate) const;
+  V8_EXPORT_PRIVATE Tagged<Union<Smi, TrustedObject>> GetTrustedData(
+      IsolateForSandbox isolate) const;
   inline Tagged<Object> GetUntrustedData() const;
 
   // Helper function for use when a specific data type is expected.
-  template <typename T, IndirectPointerTag tag>
+  template <typename T, IndirectPointerTagRange tag_range>
   inline Tagged<T> GetTrustedData(IsolateForSandbox isolate) const;
 
   // Some code may encounter unreachable unusable objects and needs to skip
@@ -463,6 +462,9 @@ class SharedFunctionInfo
   inline bool HasUntrustedData() const;
 
  public:
+  static constexpr IndirectPointerTagRange kTrustedDataIndirectPointerRange =
+      kAllIndirectPointerTags;
+
   inline bool IsApiFunction() const;
   inline bool is_class_constructor() const;
   DECL_ACCESSORS(api_func_data, Tagged<FunctionTemplateInfo>)
@@ -496,7 +498,6 @@ class SharedFunctionInfo
   inline bool HasAsmWasmData() const;
   inline bool HasWasmFunctionData(IsolateForSandbox) const;
   inline bool HasWasmExportedFunctionData(IsolateForSandbox) const;
-  inline bool HasWasmJSFunctionData(IsolateForSandbox) const;
   inline bool HasWasmCapiFunctionData(IsolateForSandbox) const;
   inline bool HasWasmResumeData() const;
   DECL_ACCESSORS(asm_wasm_data, Tagged<AsmWasmData>)
@@ -506,7 +507,6 @@ class SharedFunctionInfo
   // concurrently running worker.
   DECL_GETTER(wasm_function_data, Tagged<WasmFunctionData>)
   DECL_GETTER(wasm_exported_function_data, Tagged<WasmExportedFunctionData>)
-  DECL_GETTER(wasm_js_function_data, Tagged<WasmJSFunctionData>)
   DECL_GETTER(wasm_capi_function_data, Tagged<WasmCapiFunctionData>)
 
   DECL_GETTER(wasm_resume_data, Tagged<WasmResumeData>)
@@ -530,7 +530,6 @@ class SharedFunctionInfo
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   inline bool HasUncompiledDataWithoutPreparseData(
       IsolateForSandbox isolate) const;
-  inline void ClearUncompiledDataJobPointer(IsolateForSandbox isolate);
 
   // Clear out pre-parsed scope data from UncompiledDataWithPreparseData,
   // turning it into UncompiledDataWithoutPreparseData.
@@ -663,6 +662,9 @@ class SharedFunctionInfo
   // Indicates that the shared function info was live-edited.
   DECL_BOOLEAN_ACCESSORS(live_edited)
 
+  // Indicates that the function is a hoisted-in-context declaration.
+  DECL_BOOLEAN_ACCESSORS(is_hoisted_in_context)
+
   inline FunctionKind kind() const;
 
   int UniqueIdInScript() const;
@@ -762,8 +764,8 @@ class SharedFunctionInfo
   // Initialize a SharedFunctionInfo from a parsed or preparsed function
   // literal.
   template <typename IsolateT>
-  static void InitFromFunctionLiteral(IsolateT* isolate,
-                                      FunctionLiteral* lit, bool is_toplevel);
+  static void InitFromFunctionLiteral(IsolateT* isolate, FunctionLiteral* lit,
+                                      bool is_toplevel);
 
   template <typename IsolateT>
   static void CreateAndSetUncompiledData(IsolateT* isolate,
@@ -829,14 +831,17 @@ class SharedFunctionInfo
     ScriptIterator(const ScriptIterator&) = delete;
     ScriptIterator& operator=(const ScriptIterator&) = delete;
     V8_EXPORT_PRIVATE Tagged<SharedFunctionInfo> Next();
-    int CurrentIndex() const { return index_ - 1; }
+    uint32_t CurrentIndex() const {
+      DCHECK_GT(index_, 0);
+      return index_ - 1;
+    }
 
     // Reset the iterator to run on |script|.
     void Reset(Isolate* isolate, Tagged<Script> script);
 
    private:
     Handle<WeakFixedArray> infos_;
-    int index_;
+    uint32_t index_;
   };
 
   // Constants.

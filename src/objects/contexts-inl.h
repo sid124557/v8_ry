@@ -30,11 +30,11 @@ namespace internal {
 
 #include "torque-generated/src/objects/contexts-tq-inl.inc"
 
-int ScriptContextTable::length(AcquireLoadTag) const {
-  return length_.Acquire_Load().value();
+SafeHeapObjectSize ScriptContextTable::length(AcquireLoadTag) const {
+  return SafeHeapObjectSize(Smi::ToUInt(length_.Acquire_Load()));
 }
-void ScriptContextTable::set_length(int value, ReleaseStoreTag) {
-  length_.Release_Store(this, Smi::FromInt(value));
+void ScriptContextTable::set_length(uint32_t value, ReleaseStoreTag) {
+  length_.Release_Store(this, Smi::FromUInt(value));
 }
 
 Tagged<NameToIndexHashTable> ScriptContextTable::names_to_context_index()
@@ -46,17 +46,15 @@ void ScriptContextTable::set_names_to_context_index(
   names_to_context_index_.store(this, value, mode);
 }
 
-Tagged<Context> ScriptContextTable::get(int i) const {
-  DCHECK_LT(i, length(kAcquireLoad));
+Tagged<Context> ScriptContextTable::get(uint32_t i) const {
+  DCHECK_LT(i, length(kAcquireLoad).value());
   return Super::get(i);
 }
 
-Tagged<Context> ScriptContextTable::get(int i, AcquireLoadTag tag) const {
-  DCHECK_LT(i, length(tag));
+Tagged<Context> ScriptContextTable::get(uint32_t i, AcquireLoadTag tag) const {
+  DCHECK_LT(i, length(tag).value());
   return Super::get(i, tag);
 }
-
-TQ_OBJECT_CONSTRUCTORS_IMPL(Context)
 
 RELAXED_SMI_ACCESSORS(Context, length, kLengthOffset)
 
@@ -301,7 +299,7 @@ int Context::FunctionMapIndex(LanguageMode language_mode, FunctionKind kind,
 
 Tagged<Map> Context::GetInitialJSArrayMap(ElementsKind kind) const {
   DCHECK(IsNativeContext(*this));
-  if (!IsFastElementsKind(kind)) return Map();
+  if (!IsFastElementsKind(kind)) return {};
   DisallowGarbageCollection no_gc;
   Tagged<Object> const initial_js_array_map =
       get(Context::ArrayMapIndex(kind), kRelaxedLoad);
@@ -367,8 +365,6 @@ Tagged<Map> NativeContext::TypedArrayElementsKindToRabGsabCtorMap(
   DCHECK(InstanceTypeChecker::IsJSTypedArray(map));
   return map;
 }
-
-OBJECT_CONSTRUCTORS_IMPL(NativeContext, Context)
 
 inline std::ostream& operator<<(std::ostream& os, ContextCell::State state) {
   switch (state) {

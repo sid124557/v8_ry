@@ -5,14 +5,16 @@
 #ifndef V8_REGEXP_REGEXP_MACRO_ASSEMBLER_TRACER_H_
 #define V8_REGEXP_REGEXP_MACRO_ASSEMBLER_TRACER_H_
 
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
 #include "src/base/strings.h"
 #include "src/regexp/regexp-macro-assembler.h"
 
 namespace v8 {
 namespace internal {
+namespace regexp {
 
 // Decorator on a RegExpMacroAssembler that write all calls.
-class RegExpMacroAssemblerTracer: public RegExpMacroAssembler {
+class RegExpMacroAssemblerTracer : public RegExpMacroAssembler {
  public:
   explicit RegExpMacroAssemblerTracer(
       std::unique_ptr<RegExpMacroAssembler>&& assembler);
@@ -22,6 +24,7 @@ class RegExpMacroAssemblerTracer: public RegExpMacroAssembler {
   void AdvanceRegister(int reg, int by) override;  // r[reg] += by.
   void Backtrack() override;
   void Bind(Label* label) override;
+  void BindJumpTarget(Label* label) override;
   void CheckCharacter(unsigned c, Label* on_equal) override;
   void CheckCharacterAfterAnd(unsigned c, unsigned and_with,
                               Label* on_equal) override;
@@ -84,8 +87,8 @@ class RegExpMacroAssemblerTracer: public RegExpMacroAssembler {
   void CheckSpecialClassRanges(StandardCharacterSet type,
                                Label* on_no_match) override;
   void Fail() override;
-  DirectHandle<HeapObject> GetCode(DirectHandle<String> source,
-                                   RegExpFlags flags) override;
+  DirectHandle<HeapObject> GetCode(DirectHandle<RegExpData> re_data,
+                                   Flags flags) override;
   void GoTo(Label* label) override;
   void IfRegisterGE(int reg, int comparand, Label* if_ge) override;
   void IfRegisterLT(int reg, int comparand, Label* if_lt) override;
@@ -115,7 +118,6 @@ class RegExpMacroAssemblerTracer: public RegExpMacroAssembler {
   MacroAssembler* masm() override { return assembler_->masm(); }
 
   void set_global_mode(GlobalMode mode) override;
-  void set_slow_safe(bool ssc) override;
   void set_backtrack_limit(uint32_t backtrack_limit) override;
   void set_can_fallback(bool val) override;
 
@@ -123,7 +125,9 @@ class RegExpMacroAssemblerTracer: public RegExpMacroAssembler {
   std::unique_ptr<RegExpMacroAssembler> assembler_;
 };
 
+}  // namespace regexp
 }  // namespace internal
 }  // namespace v8
+#endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
 
 #endif  // V8_REGEXP_REGEXP_MACRO_ASSEMBLER_TRACER_H_

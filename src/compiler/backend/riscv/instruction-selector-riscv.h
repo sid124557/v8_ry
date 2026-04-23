@@ -35,22 +35,26 @@ static int EncodeElementWidth(VSew sew) {
   // The lane size field has 8 free bits, so there is plenty of room.
   static_assert((0 <= static_cast<int>(VSew::E8)) &&
                 (static_cast<int>(VSew::E64) <= 3));
-#ifdef DEBUG
-  // In debug mode, we mark one bit to indicate that the lane size is
-  // populated.
-  return LaneSizeField::encode(0x4 | sew);
-#else
-  return LaneSizeField::encode(sew);
-#endif
+  switch (sew) {
+    case VSew::E8:
+      return LaneSizeField::encode(LaneSize::kL8);
+    case VSew::E16:
+      return LaneSizeField::encode(LaneSize::kL16);
+    case VSew::E32:
+      return LaneSizeField::encode(LaneSize::kL32);
+    case VSew::E64:
+      return LaneSizeField::encode(LaneSize::kL64);
+    default:
+      UNREACHABLE();
+  }
 }
 
 static int EncodeRegisterConstraint(RiscvRegisterConstraint constraint) {
   // The element width is encoded in 3 bits, which leaves us some bits
   // for asserting that the register constraints are correct.
 #ifdef DEBUG
-  static_assert(static_cast<int>(VSew::E64) <= 3);
-  DCHECK(static_cast<int>(constraint) <= 0xF);
-  return LaneSizeField::encode(static_cast<int>(constraint) << 3);
+  DCHECK(static_cast<int>(constraint) <= 0x7);
+  return RiscvRegisterConstraintField::encode(constraint);
 #else
   return 0;
 #endif
@@ -335,90 +339,90 @@ void EmitS128Load(InstructionSelector* selector, OpIndex node,
 void InstructionSelector::VisitLoadTransform(OpIndex node) {
   const Simd128LoadTransformOp& op =
       this->Get(node).Cast<Simd128LoadTransformOp>();
-  bool is_protected = (op.load_kind.with_trap_handler);
+  bool is_trapping = (op.load_kind.with_trap_handler);
   InstructionCode opcode = kArchNop;
   switch (op.transform_kind) {
     case Simd128LoadTransformOp::TransformKind::k8Splat:
       opcode = kRiscvS128LoadSplat | EncodeElementWidth(E8);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16Splat:
       opcode = kRiscvS128LoadSplat | EncodeElementWidth(E16);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32Splat:
       opcode = kRiscvS128LoadSplat | EncodeElementWidth(E32);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k64Splat:
       opcode = kRiscvS128LoadSplat | EncodeElementWidth(E64);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k8x8S:
       opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E16);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k8x8U:
       opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E16);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16x4S:
       opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E32);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16x4U:
       opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E32);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32x2S:
       opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E64);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32x2U:
       opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E64);
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32Zero:
       opcode = kRiscvS128Load32Zero;
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k64Zero:
       opcode = kRiscvS128Load64Zero;
-      if (is_protected) {
-        opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+      if (is_trapping) {
+        opcode |= AccessModeField::encode(kMemoryAccessTrappingMemOutOfBounds);
       }
       EmitS128Load(this, node, opcode);
       break;
@@ -434,32 +438,32 @@ static Instruction* VisitCompare(InstructionSelector* selector,
                                  InstructionOperand left,
                                  InstructionOperand right,
                                  FlagsContinuation* cont) {
+  RiscvOperandGenerator g(selector);
+  InstructionOperand inputs[4];
+  size_t input_count = 0;
+  inputs[input_count++] = left;
+  inputs[input_count++] = right;
+  if (cont->IsSelect()) {
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->true_value());
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->false_value());
+  }
 #ifdef V8_COMPRESS_POINTERS
   if (opcode == kRiscvCmp32) {
-    RiscvOperandGenerator g(selector);
-    InstructionOperand inputs[] = {left, right};
     if (right.IsImmediate()) {
       InstructionOperand temps[1] = {g.TempRegister()};
-      return selector->EmitWithContinuation(opcode, 0, nullptr,
-                                            arraysize(inputs), inputs,
-                                            arraysize(temps), temps, cont);
+      return selector->EmitWithContinuation(opcode, 0, nullptr, input_count,
+                                            inputs, arraysize(temps), temps,
+                                            cont);
     } else {
       InstructionOperand temps[2] = {g.TempRegister(), g.TempRegister()};
-      return selector->EmitWithContinuation(opcode, 0, nullptr,
-                                            arraysize(inputs), inputs,
-                                            arraysize(temps), temps, cont);
+      return selector->EmitWithContinuation(opcode, 0, nullptr, input_count,
+                                            inputs, arraysize(temps), temps,
+                                            cont);
     }
   }
 #endif
-  return selector->EmitWithContinuation(opcode, left, right, cont);
-}
-
-// Shared routine for multiple compare operations.
-
-static Instruction* VisitWordCompareZero(InstructionSelector* selector,
-                                         InstructionOperand value,
-                                         FlagsContinuation* cont) {
-  return selector->EmitWithContinuation(kRiscvCmpZero, value, cont);
+  return selector->EmitWithContinuation(opcode, 0, nullptr, input_count, inputs,
+                                        cont);
 }
 
 // Shared routine for multiple float32 compare operations.
@@ -536,35 +540,20 @@ Instruction* VisitWordCompare(InstructionSelector* selector, OpIndex node,
             return VisitCompare(selector, opcode, g.UseRegister(left),
                                 g.UseImmediate(right), cont);
           } else {
-            if (g.CanBeZero(right)) {
-              return VisitWordCompareZero(
-                  selector, g.UseRegisterOrImmediateZero(left), cont);
-            } else {
               return VisitCompare(selector, opcode, g.UseRegister(left),
                                   g.UseRegister(right), cont);
-            }
           }
           break;
         case kSignedLessThan:
         case kSignedGreaterThanOrEqual:
         case kUnsignedLessThan:
         case kUnsignedGreaterThanOrEqual: {
-          if (g.CanBeZero(right)) {
-            return VisitWordCompareZero(
-                selector, g.UseRegisterOrImmediateZero(left), cont);
-          } else {
             return VisitCompare(selector, opcode, g.UseRegister(left),
                                 g.UseImmediate(right), cont);
-          }
         } break;
         default:
-          if (g.CanBeZero(right)) {
-            return VisitWordCompareZero(
-                selector, g.UseRegisterOrImmediateZero(left), cont);
-          } else {
             return VisitCompare(selector, opcode, g.UseRegister(left),
                                 g.UseRegister(right), cont);
-          }
       }
     }
   } else {
@@ -609,8 +598,15 @@ void InstructionSelector::VisitSwitch(OpIndex node, const SwitchInfo& sw) {
 void EmitWordCompareZero(InstructionSelector* selector, OpIndex value,
                          FlagsContinuation* cont) {
   RiscvOperandGenerator g(selector);
-  selector->EmitWithContinuation(kRiscvCmpZero,
-                                 g.UseRegisterOrImmediateZero(value), cont);
+  size_t input_count = 0;
+  InstructionOperand inputs[4];
+  inputs[input_count++] = g.UseRegisterOrImmediateZero(value);
+  if (cont->IsSelect()) {
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->true_value());
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->false_value());
+  }
+  selector->EmitWithContinuation(kRiscvCmpZero, 0, nullptr, input_count, inputs,
+                                 cont);
 }
 
 #ifdef V8_TARGET_ARCH_RISCV64
@@ -618,9 +614,15 @@ void EmitWordCompareZero(InstructionSelector* selector, OpIndex value,
 void EmitWord32CompareZero(InstructionSelector* selector, OpIndex value,
                            FlagsContinuation* cont) {
   RiscvOperandGenerator g(selector);
-  InstructionOperand inputs[] = {g.UseRegisterOrImmediateZero(value)};
+  InstructionOperand inputs[3];
+  size_t input_count = 0;
+  inputs[input_count++] = g.UseRegisterOrImmediateZero(value);
   InstructionOperand temps[] = {g.TempRegister()};
-  selector->EmitWithContinuation(kRiscvCmpZero32, 0, nullptr, arraysize(inputs),
+  if (cont->IsSelect()) {
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->true_value());
+    inputs[input_count++] = g.UseRegisterOrImmediateZero(cont->false_value());
+  }
+  selector->EmitWithContinuation(kRiscvCmpZero32, 0, nullptr, input_count,
                                  inputs, arraysize(temps), temps, cont);
 }
 #endif
@@ -1719,29 +1721,43 @@ void InstructionSelector::VisitF64x2Pmax(OpIndex node) {
 }
 
 void InstructionSelector::VisitTruncateFloat64ToFloat16RawBits(OpIndex node) {
-  UNIMPLEMENTED();
+  RiscvOperandGenerator g(this);
+  const ChangeOp& op = Cast<ChangeOp>(node);
+  InstructionOperand inputs[] = {g.UseRegister(op.input())};
+  InstructionOperand outputs[] = {g.DefineAsRegister(node)};
+  InstructionOperand temps[] = {g.TempDoubleRegister()};
+  Emit(kRiscvFloat64ToFloat16RawBits, arraysize(outputs), outputs,
+       arraysize(inputs), inputs, arraysize(temps), temps);
 }
 
 void InstructionSelector::VisitChangeFloat16RawBitsToFloat64(OpIndex node) {
-  UNIMPLEMENTED();
+  RiscvOperandGenerator g(this);
+  const ChangeOp& op = Cast<ChangeOp>(node);
+  InstructionOperand inputs[] = {g.UseRegister(op.input())};
+  InstructionOperand outputs[] = {g.DefineAsRegister(node)};
+  InstructionOperand temps[] = {g.TempDoubleRegister()};
+  Emit(kRiscvFloat16RawBitsToFloat64, arraysize(outputs), outputs,
+       arraysize(inputs), inputs, arraysize(temps), temps);
 }
 
 // static
+/*
+Only support FullUnalignedAccessSupport in V8.
+
+Mainstream high-performance RISC-V cores (U74, U54, XuanTie C9xx)
+now support misaligned access in hardware.If hardware lacking support, the SBI
+specification requires firmware to handle these cases via trap handlers.
+*/
 MachineOperatorBuilder::AlignmentRequirements
 InstructionSelector::AlignmentRequirements() {
-#ifdef RISCV_HAS_NO_UNALIGNED
-  return MachineOperatorBuilder::AlignmentRequirements::
-      NoUnalignedAccessSupport();
-#else
   return MachineOperatorBuilder::AlignmentRequirements::
       FullUnalignedAccessSupport();
-#endif
 }
 
 void InstructionSelector::AddOutputToSelectContinuation(OperandGenerator* g,
                                                         int first_input_index,
                                                         OpIndex node) {
-  UNREACHABLE();
+  continuation_outputs_.push_back(g->DefineAsRegister(node));
 }
 
 #if V8_ENABLE_WEBASSEMBLY

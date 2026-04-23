@@ -150,6 +150,10 @@ namespace internal {
   T(IteratorReduceNoInitial,                                                   \
     "Reduce of a done iterator with no initial value")                         \
   T(IteratorResultNotAnObject, "Iterator result % is not an object")           \
+  T(InvalidIteratorZipMode,                                                    \
+    "% mode must be 'shortest', 'longest', or 'strict'")                       \
+  T(IteratorZipStrictMismatch,                                                 \
+    "Iterators passed to % in 'strict' mode must have the same length")        \
   T(SpreadIteratorSymbolNonCallable,                                           \
     "Spread syntax requires ...iterable[Symbol.iterator] to be a function")    \
   T(FirstArgumentIteratorSymbolNonCallable,                                    \
@@ -189,6 +193,7 @@ namespace internal {
   T(NonStringImportAttributeValue, "Import attribute value must be a string")  \
   T(NoSetterInCallback, "Cannot set property % of % which has only a getter")  \
   T(NotAnIterator, "% is not an iterator")                                     \
+  T(NotReadyForSyncExec, "Deferred module is not ready for sync execution")    \
   T(PromiseNewTargetUndefined,                                                 \
     "Promise constructor cannot be invoked without 'new'")                     \
   T(NotConstructor, "% is not a constructor")                                  \
@@ -455,6 +460,7 @@ namespace internal {
   T(TypedArraySetSourceTooLarge, "Source is too large")                        \
   T(TypedArrayTooLargeToSort,                                                  \
     "Custom comparefn not supported for huge TypedArrays")                     \
+  T(IterableTooLargeToSum, "Math.sumPrecise not supported for huge iterables") \
   T(ValueOutOfRange, "Value % out of range for % options property %")          \
   T(CollectionGrowFailed, "% maximum size exceeded")                           \
   T(MustBePositive, "% must be positive")                                      \
@@ -726,8 +732,11 @@ namespace internal {
   T(WasmTrapStringInvalidUtf8, "invalid UTF-8 string")                         \
   T(WasmTrapStringInvalidWtf8, "invalid WTF-8 string")                         \
   T(WasmTrapStringOffsetOutOfBounds, "string offset out of bounds")            \
-  T(WasmTrapResume, "resuming an invalid continuation")                        \
+  T(WasmTrapResume, "WasmFX: resuming an invalid continuation")                \
+  T(WasmTrapSuspend, "WasmFX: unhandled suspend")                              \
+  T(WasmTrapSwitch, "WasmFX: switching from central stack")                    \
   T(WasmSuspendError, "trying to suspend without WebAssembly.promising")       \
+  T(WasmFXSuspendError, "WasmFX: unhandled suspend")                           \
   T(WasmTrapStringIsolatedSurrogate,                                           \
     "Failed to encode string as UTF-8: contains unpaired surrogate")           \
   T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \

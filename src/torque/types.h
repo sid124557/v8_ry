@@ -231,6 +231,7 @@ struct Field {
 
   bool custom_weak_marking;
   bool const_qualified;
+  bool index_is_constant;
   FieldSynchronization synchronization;
 };
 
@@ -728,8 +729,7 @@ class ClassType final : public AggregateType {
            (!IsExtern() && !IsAbstract());
   }
   bool ShouldGenerateFactoryFunction() const {
-    return (flags_ & ClassFlag::kGenerateFactoryFunction) ||
-           (ShouldExport() && !IsAbstract());
+    return ShouldExport() && !IsAbstract();
   }
   bool ShouldExport() const { return flags_ & ClassFlag::kExport; }
   bool IsShape() const { return flags_ & ClassFlag::kIsShape; }
